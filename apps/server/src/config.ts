@@ -11,6 +11,7 @@ export interface ServerConfig {
   sessionSecret: string;
   allowDevAuth: boolean;
   serveStaticDir: string | null;
+  statsFilePath: string | null;
   disconnectGraceMs: number;
 }
 
@@ -61,6 +62,7 @@ export function loadServerConfig(overrides: Partial<ServerConfig> = {}): ServerC
   const webDistPath = path.join(repoRoot, 'apps', 'web', 'dist');
   const serveStaticDir =
     process.env.SERVE_STATIC === 'true' && fs.existsSync(webDistPath) ? webDistPath : null;
+  const statsFilePath = path.join(repoRoot, 'data', 'stats.json');
 
   return {
     port: Number.isFinite(port) && port >= 0 ? port : 3001,
@@ -70,6 +72,7 @@ export function loadServerConfig(overrides: Partial<ServerConfig> = {}): ServerC
     sessionSecret,
     allowDevAuth,
     serveStaticDir,
+    statsFilePath,
     disconnectGraceMs: 30_000,
     ...overrides,
   };

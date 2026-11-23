@@ -2,22 +2,28 @@ import {
   ACTIVITY_LIMITS,
   type ActivityPlayer,
   type ActivityRoomState,
+  type ChallengeModifier,
+  type EmotePingId,
   type GameWorldState,
-  LEVEL_CHAMBER_01,
+  type LevelDefinition,
   PHYSICS,
   type PlayerTickInput,
   type RoomUpdateReason,
   type S2CMessage,
   SOLO_PUPPET_ID,
+  type SessionClearSummary,
   type SimEvent,
   createGameWorld,
   createPlayerEntity,
   getPaletteForSlot,
+  normalizeProceduralSeed,
+  resolveLevel,
   sanitizeDisplayName,
   stepGameWorld,
 } from '@together/game-core';
 import type { WebSocket } from 'ws';
 import type { VerifiedSessionUser } from '../auth/sessionToken.js';
+import type { StatsStore } from '../storage/statsStore.js';
 
 interface ManagedPlayer {
   id: string;
@@ -32,6 +38,7 @@ interface ManagedPlayer {
   ready: boolean;
   joinedAt: number;
   disconnectedAt: number | null;
+  lastEmoteAt: number;
   socket: WebSocket | null;
   graceTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -42,8 +49,13 @@ interface ManagedRoom {
   guildId: string | null;
   phase: 'lobby' | 'playing';
   hostId: string | null;
+  selectedLevelId: string;
+  selectedSeed: number | null;
+  modifier: ChallengeModifier;
+  activeLevel: LevelDefinition | null;
   createdAt: number;
   players: Map<string, ManagedPlayer>;
+  sessionClears: SessionClearSummary[];
   world: GameWorldState | null;
   inputs: Map<string, PlayerTickInput>;
   pendingEvents: SimEvent[];
@@ -77,6 +89,8 @@ export type ActionResult =
 
 const IMMEDIATE_EVENT_TYPES = new Set<SimEvent['type']>([
   'bridge_lock',
+  'key_pickup',
+  'gate_unlock',
   'door_unlock',
   'respawn',
   'level_complete',
@@ -86,9 +100,14 @@ export class ActivityRoomManager {
   private readonly rooms = new Map<string, ManagedRoom>();
   private readonly socketBindings = new Map<WebSocket, SocketBinding>();
   private readonly disconnectGraceMs: number;
+  private readonly statsStore: StatsStore | null;
 
-  constructor(disconnectGraceMs: number = ACTIVITY_LIMITS.DISCONNECT_GRACE_MS) {
+  constructor(
+    disconnectGraceMs: number = ACTIVITY_LIMITS.DISCONNECT_GRACE_MS,
+    statsStore: StatsStore | null = null,
+  ) {
     this.disconnectGraceMs = disconnectGraceMs;
+    this.statsStore = statsStore;
   }
 
   getStats(): { activeInstances: number; activePlayers: number } {
@@ -139,8 +158,13 @@ export class ActivityRoomManager {
         guildId,
         phase: 'lobby',
         hostId: null,
+        selectedLevelId: 'chamber-01',
+        selectedSeed: null,
+        modifier: 'standard',
+        activeLevel: null,
         createdAt: now,
         players: new Map(),
+        sessionClears: [],
         world: null,
         inputs: new Map(),
         pendingEvents: [],
@@ -235,6 +259,7 @@ export class ActivityRoomManager {
       ready: false,
       joinedAt: now,
       disconnectedAt: null,
+      lastEmoteAt: 0,
       socket,
       graceTimer: null,
     };
@@ -244,8 +269,7 @@ export class ActivityRoomManager {
       room.hostId = player.id;
     }
 
-    // If a match is already running (e.g., Solo Practice), seamlessly add this real Discord player!
-    if (room.world && room.phase === 'playing') {
+    if (room.world && room.phase === 'playing' && room.activeLevel) {
       if (room.world.soloPractice) {
         room.world.soloPractice = false;
         room.world.soloActiveId = null;
@@ -253,7 +277,7 @@ export class ActivityRoomManager {
         room.inputs.delete(SOLO_PUPPET_ID);
       }
       room.world.players.push(
-        createPlayerEntity(LEVEL_CHAMBER_01, {
+        createPlayerEntity(room.activeLevel, {
           id: player.id,
           displayName: player.displayName,
           slot: player.slot,
@@ -261,6 +285,13 @@ export class ActivityRoomManager {
         }),
       );
       room.world.players.sort((a, b) => a.slot - b.slot);
+      if (!room.world.contributions[player.id]) {
+        room.world.contributions[player.id] = {
+          switchesTriggered: 0,
+          keysCollected: 0,
+          respawns: 0,
+        };
+      }
     }
 
     this.socketBindings.set(socket, { instanceId, playerId: player.id });
@@ -309,7 +340,41 @@ export class ActivityRoomManager {
     return serialized;
   }
 
-  startGame(socket: WebSocket): ActionResult {
+  selectLevel(
+    socket: WebSocket,
+    params: { levelId: string; proceduralSeed?: number | null; modifier?: ChallengeModifier },
+  ): ActionResult {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) {
+      return { ok: false, code: 'NOT_IN_ROOM', message: 'Join an Activity instance first.' };
+    }
+    const room = this.rooms.get(binding.instanceId);
+    if (!room) {
+      return { ok: false, code: 'NOT_IN_ROOM', message: 'Activity room not found.' };
+    }
+    if (room.hostId !== binding.playerId) {
+      return { ok: false, code: 'NOT_HOST', message: 'Only the room host can select chambers.' };
+    }
+
+    const resolved = resolveLevel(params.levelId, params.proceduralSeed);
+    room.selectedLevelId = resolved.id;
+    room.selectedSeed = resolved.proceduralSeed ?? null;
+    if (params.modifier) {
+      room.modifier = params.modifier;
+    }
+
+    this.broadcast(room, {
+      type: 'room_state',
+      reason: 'level_selected',
+      room: this.serializeRoom(room),
+    });
+    return { ok: true };
+  }
+
+  startGame(
+    socket: WebSocket,
+    options: { levelId?: string; proceduralSeed?: number | null; modifier?: ChallengeModifier } = {},
+  ): ActionResult {
     const binding = this.socketBindings.get(socket);
     if (!binding) {
       return { ok: false, code: 'NOT_IN_ROOM', message: 'Join an Activity instance first.' };
@@ -320,6 +385,15 @@ export class ActivityRoomManager {
     }
     if (room.hostId !== binding.playerId) {
       return { ok: false, code: 'NOT_HOST', message: 'Only the room host can start the level.' };
+    }
+
+    if (options.levelId) {
+      const resolved = resolveLevel(options.levelId, options.proceduralSeed);
+      room.selectedLevelId = resolved.id;
+      room.selectedSeed = resolved.proceduralSeed ?? null;
+    }
+    if (options.modifier) {
+      room.modifier = options.modifier;
     }
 
     this.initLevelWorld(room);
@@ -367,12 +441,13 @@ export class ActivityRoomManager {
       return { ok: false, code: 'NOT_IN_ROOM', message: 'Activity room not found.' };
     }
     if (room.hostId !== binding.playerId) {
-      return { ok: false, code: 'NOT_HOST', message: 'Only the room host can return to lobby.' };
+      return { ok: false, code: 'NOT_HOST', message: 'Only the room host can return to menu.' };
     }
 
     this.stopSimulationLoop(room);
     room.phase = 'lobby';
     room.world = null;
+    room.activeLevel = null;
     room.inputs.clear();
     room.pendingEvents = [];
     for (const p of room.players.values()) {
@@ -406,6 +481,32 @@ export class ActivityRoomManager {
     return true;
   }
 
+  sendEmote(socket: WebSocket, emote: EmotePingId): boolean {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) return false;
+    const room = this.rooms.get(binding.instanceId);
+    if (!room) return false;
+    const player = room.players.get(binding.playerId);
+    if (!player || !player.connected) return false;
+
+    const now = Date.now();
+    if (now - player.lastEmoteAt < 500) return false;
+    player.lastEmoteAt = now;
+
+    const targetId =
+      room.world?.soloPractice && room.world.soloActiveId
+        ? room.world.soloActiveId
+        : binding.playerId;
+
+    this.broadcast(room, {
+      type: 'player_emote',
+      playerId: targetId,
+      emote,
+      serverTime: now,
+    });
+    return true;
+  }
+
   swapSoloPuppet(socket: WebSocket): boolean {
     const binding = this.socketBindings.get(socket);
     if (!binding) return false;
@@ -418,7 +519,6 @@ export class ActivityRoomManager {
     const current = room.world.soloActiveId ?? binding.playerId;
     const next = current === binding.playerId ? SOLO_PUPPET_ID : binding.playerId;
 
-    // Release input on the parked character so it stops cleanly where left.
     room.inputs.set(current, { buttons: 0 });
     room.inputs.set(next, { buttons: 0 });
     room.world.soloActiveId = next;
@@ -493,6 +593,16 @@ export class ActivityRoomManager {
   }
 
   private initLevelWorld(room: ManagedRoom): void {
+    const level = resolveLevel(
+      room.selectedLevelId,
+      room.selectedLevelId.startsWith('procedural')
+        ? normalizeProceduralSeed(room.selectedSeed)
+        : null,
+    );
+    room.activeLevel = level;
+    room.selectedLevelId = level.id;
+    room.selectedSeed = level.proceduralSeed ?? null;
+
     const orderedPlayers = Array.from(room.players.values()).sort((a, b) => a.slot - b.slot);
     const connectedCount = orderedPlayers.filter((p) => p.connected).length;
     const soloPractice = connectedCount === 1;
@@ -505,8 +615,9 @@ export class ActivityRoomManager {
         connected: p.connected,
       })),
       {
-        level: LEVEL_CHAMBER_01,
+        level,
         soloPractice,
+        modifier: room.modifier,
       },
     );
     room.inputs.clear();
@@ -522,7 +633,7 @@ export class ActivityRoomManager {
 
     const stepMs = 1000 / PHYSICS.TICK_RATE;
     room.simTimer = setInterval(() => {
-      if (!room.world || room.phase !== 'playing') {
+      if (!room.world || !room.activeLevel || room.phase !== 'playing') {
         this.stopSimulationLoop(room);
         return;
       }
@@ -534,6 +645,7 @@ export class ActivityRoomManager {
 
       let stepsRun = 0;
       let forceBroadcast = false;
+      const wasCompleted = room.world.status === 'completed';
 
       while (room.accumulatorMs >= stepMs && stepsRun < 4) {
         room.accumulatorMs -= stepMs;
@@ -544,7 +656,7 @@ export class ActivityRoomManager {
           inputRecord[id] = inp;
         }
 
-        const tickEvents = stepGameWorld(room.world, inputRecord, LEVEL_CHAMBER_01);
+        const tickEvents = stepGameWorld(room.world, inputRecord, room.activeLevel);
         if (tickEvents.length > 0) {
           room.pendingEvents.push(...tickEvents);
           if (tickEvents.some((e) => IMMEDIATE_EVENT_TYPES.has(e.type))) {
@@ -566,10 +678,59 @@ export class ActivityRoomManager {
         this.broadcastSnapshot(room, events);
       }
 
-      if (room.world.status === 'completed') {
+      if (!wasCompleted && room.world.status === 'completed') {
+        this.recordCompletedRun(room);
         this.stopSimulationLoop(room);
       }
     }, 16);
+  }
+
+  private recordCompletedRun(room: ManagedRoom): void {
+    const world = room.world;
+    const level = room.activeLevel;
+    if (!world || !level || world.completionTimeMs === null || !world.medal) return;
+
+    const clearSummary: SessionClearSummary = {
+      levelId: level.id,
+      levelName: `${level.name} · ${level.title}`,
+      modifier: world.modifier,
+      completionTimeMs: world.completionTimeMs,
+      respawnCount: world.respawnCount,
+      medal: world.medal,
+      clearedAt: Date.now(),
+    };
+    room.sessionClears.unshift(clearSummary);
+    if (room.sessionClears.length > 20) {
+      room.sessionClears = room.sessionClears.slice(0, 20);
+    }
+
+    if (this.statsStore) {
+      const realPlayers = world.players.filter((p) => !p.isSoloPuppet);
+      this.statsStore.recordClear({
+        levelId: level.id,
+        levelName: `${level.name} · ${level.title}`,
+        modifier: world.modifier,
+        completionTimeMs: world.completionTimeMs,
+        respawnCount: world.respawnCount,
+        medal: world.medal,
+        soloPractice: world.soloPractice,
+        players: realPlayers.map((p) => ({
+          id: p.id,
+          displayName: p.displayName,
+          contribution: world.contributions[p.id] ?? {
+            switchesTriggered: 0,
+            keysCollected: 0,
+            respawns: 0,
+          },
+        })),
+      });
+    }
+
+    this.broadcast(room, {
+      type: 'room_state',
+      reason: 'sync',
+      room: this.serializeRoom(room),
+    });
   }
 
   private stopSimulationLoop(room: ManagedRoom): void {
@@ -674,10 +835,14 @@ export class ActivityRoomManager {
       guildId: room.guildId,
       phase: room.phase,
       hostId: room.hostId,
+      selectedLevelId: room.selectedLevelId,
+      selectedSeed: room.selectedSeed,
+      modifier: room.modifier,
       minPlayers: ACTIVITY_LIMITS.MIN_PLAYERS,
       maxPlayers: ACTIVITY_LIMITS.MAX_PLAYERS,
       createdAt: room.createdAt,
       players,
+      sessionClears: room.sessionClears,
     };
   }
 

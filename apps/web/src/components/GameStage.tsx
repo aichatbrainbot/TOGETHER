@@ -1,28 +1,42 @@
 import {
+  EMOTE_PINGS,
+  type EmotePingId,
   type GameWorldState,
   INPUT_BITS,
-  LEVEL_CHAMBER_01,
   type SimEvent,
   type SimPlayerState,
+  getNextLevelId,
+  resolveLevel,
 } from '@together/game-core';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { GameRenderer, type RenderedPlayerPose } from '../game/GameRenderer.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ActiveEmote, GameRenderer, type RenderedPlayerPose } from '../game/GameRenderer.js';
 import type { GameSettings } from '../game/settings.js';
 import { SoundEngine } from '../game/SoundEngine.js';
-import { FullscreenIcon, RestartIcon, SoundOffIcon, SoundOnIcon } from './Icons.js';
+import {
+  CloseIcon,
+  FullscreenIcon,
+  RestartIcon,
+  SettingsIcon,
+  SoundOffIcon,
+  SoundOnIcon,
+} from './Icons.js';
 
 interface GameStageProps {
   world: GameWorldState;
   events: readonly SimEvent[];
   eventBatchId: number;
+  emotesByPlayerId: ReadonlyMap<string, ActiveEmote>;
+  emoteSeq: number;
   localUserId: string;
   isHost: boolean;
   pingMs: number | null;
   settings: GameSettings;
   onUpdateSettings: (patch: Partial<GameSettings>) => void;
   onSendInput: (seq: number, buttons: number) => void;
+  onSendEmote: (emote: EmotePingId) => void;
   onSwapSolo: () => void;
   onRestartLevel: () => void;
+  onStartNextLevel: (nextLevelId: string, proceduralSeed?: number) => void;
   onReturnLobby: () => void;
 }
 
@@ -38,14 +52,18 @@ export function GameStage({
   world,
   events,
   eventBatchId,
+  emotesByPlayerId,
+  emoteSeq,
   localUserId,
   isHost,
   pingMs,
   settings,
   onUpdateSettings,
   onSendInput,
+  onSendEmote,
   onSwapSolo,
   onRestartLevel,
+  onStartNextLevel,
   onReturnLobby,
 }: GameStageProps) {
   const stageRef = useRef<HTMLElement | null>(null);
@@ -53,27 +71,49 @@ export function GameStage({
   const rendererRef = useRef<GameRenderer | null>(null);
   const soundRef = useRef<SoundEngine | null>(null);
 
+  const [pauseOpen, setPauseOpen] = useState(false);
+
+  const activeLevel = useMemo(
+    () => resolveLevel(world.levelId, world.proceduralSeed),
+    [world.levelId, world.proceduralSeed],
+  );
+
   const latestWorldRef = useRef<GameWorldState>(world);
+  const activeLevelRef = useRef(activeLevel);
   const settingsRef = useRef<GameSettings>(settings);
+  const emotesRef = useRef<ReadonlyMap<string, ActiveEmote>>(emotesByPlayerId);
   const viewportRef = useRef<{ w: number; h: number }>({
-    w: LEVEL_CHAMBER_01.width,
-    h: LEVEL_CHAMBER_01.height,
+    w: activeLevel.width,
+    h: activeLevel.height,
   });
   const posesRef = useRef<Map<string, RenderedPlayerPose>>(new Map());
   const keysRef = useRef<Set<string>>(new Set());
   const touchBitsRef = useRef<number>(0);
+  const gamepadBitsRef = useRef<number>(0);
+  const prevGamepadSwapRef = useRef<boolean>(false);
   const lastSentBitsRef = useRef<number>(-1);
   const seqRef = useRef<number>(1);
   const lastEventBatchRef = useRef<number>(-1);
+  const lastEmoteSeqRef = useRef<number>(0);
 
   if (!rendererRef.current) rendererRef.current = new GameRenderer();
   if (!soundRef.current) soundRef.current = new SoundEngine();
 
+  activeLevelRef.current = activeLevel;
   settingsRef.current = settings;
+  emotesRef.current = emotesByPlayerId;
+
   useEffect(() => {
     soundRef.current?.setMuted(!settings.soundEnabled);
     soundRef.current?.setVolume(settings.volume);
   }, [settings.soundEnabled, settings.volume]);
+
+  useEffect(() => {
+    if (emoteSeq > lastEmoteSeqRef.current) {
+      lastEmoteSeqRef.current = emoteSeq;
+      soundRef.current?.play('emote');
+    }
+  }, [emoteSeq]);
 
   // Keep latest authoritative snapshot in ref & trigger event VFX/SFX once per batch
   useEffect(() => {
@@ -145,7 +185,7 @@ export function GameStage({
   }, []);
 
   const computeButtons = useCallback((): number => {
-    let bits = touchBitsRef.current;
+    let bits = touchBitsRef.current | gamepadBitsRef.current;
     const keys = keysRef.current;
     if (keys.has('ArrowLeft') || keys.has('KeyA')) bits |= INPUT_BITS.LEFT;
     if (keys.has('ArrowRight') || keys.has('KeyD')) bits |= INPUT_BITS.RIGHT;
@@ -165,7 +205,7 @@ export function GameStage({
     [computeButtons, onSendInput],
   );
 
-  // Keyboard controls + blur safety release
+  // Keyboard controls, emote hotkeys (1-4), Esc pause overlay, blur safety release
   useEffect(() => {
     const preventKeys = new Set([
       'ArrowLeft',
@@ -182,6 +222,28 @@ export function GameStage({
         e.preventDefault();
       }
       if (e.repeat) return;
+
+      if (e.code === 'Escape') {
+        setPauseOpen((open) => !open);
+        return;
+      }
+
+      if (e.code === 'Digit1') {
+        onSendEmote('stack');
+        return;
+      }
+      if (e.code === 'Digit2') {
+        onSendEmote('wait');
+        return;
+      }
+      if (e.code === 'Digit3') {
+        onSendEmote('go');
+        return;
+      }
+      if (e.code === 'Digit4') {
+        onSendEmote('nice');
+        return;
+      }
 
       if (e.code === 'Tab' && latestWorldRef.current.soloPractice) {
         onSwapSolo();
@@ -204,6 +266,7 @@ export function GameStage({
     const onBlur = () => {
       keysRef.current.clear();
       touchBitsRef.current = 0;
+      gamepadBitsRef.current = 0;
       flushInput(true);
     };
 
@@ -217,21 +280,57 @@ export function GameStage({
       window.removeEventListener('blur', onBlur);
       onSendInput(seqRef.current + 1, 0);
     };
-  }, [flushInput, onRestartLevel, onSendInput, onSwapSolo]);
+  }, [flushInput, onRestartLevel, onSendEmote, onSendInput, onSwapSolo]);
 
-  // 60 FPS full-screen animation loop with smooth entity interpolation
+  // 60 FPS full-screen animation loop + Gamepad API polling + smooth interpolation
   useEffect(() => {
     let rafId = 0;
     let lastTime = performance.now();
+
+    const pollGamepad = () => {
+      if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
+      const pads = navigator.getGamepads();
+      const pad = pads.find((g) => g && g.connected);
+      if (!pad) {
+        if (gamepadBitsRef.current !== 0) {
+          gamepadBitsRef.current = 0;
+          flushInput(false);
+        }
+        return;
+      }
+
+      let gBits = 0;
+      const axisX = pad.axes[0] ?? 0;
+      const dpadLeft = pad.buttons[14]?.pressed ?? false;
+      const dpadRight = pad.buttons[15]?.pressed ?? false;
+      const jumpPressed = (pad.buttons[0]?.pressed ?? false) || (pad.buttons[1]?.pressed ?? false);
+      const swapPressed = pad.buttons[3]?.pressed ?? false;
+
+      if (axisX < -0.35 || dpadLeft) gBits |= INPUT_BITS.LEFT;
+      if (axisX > 0.35 || dpadRight) gBits |= INPUT_BITS.RIGHT;
+      if (jumpPressed) gBits |= INPUT_BITS.JUMP;
+
+      if (swapPressed && !prevGamepadSwapRef.current && latestWorldRef.current.soloPractice) {
+        onSwapSolo();
+      }
+      prevGamepadSwapRef.current = swapPressed;
+
+      if (gBits !== gamepadBitsRef.current) {
+        gamepadBitsRef.current = gBits;
+        flushInput(false);
+      }
+    };
 
     const frame = (now: number) => {
       const dtSec = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
       lastTime = now;
 
+      pollGamepad();
+
       const currentWorld = latestWorldRef.current;
       const poses = posesRef.current;
-
       const smoothFactor = 1 - Math.exp(-24 * dtSec);
+
       for (const p of currentWorld.players) {
         const pose = poses.get(p.id);
         if (!pose) {
@@ -258,11 +357,15 @@ export function GameStage({
         const ctx = canvas.getContext('2d');
         if (ctx) {
           rendererRef.current?.render(ctx, currentWorld, poses, localUserId, dtSec, {
-            level: LEVEL_CHAMBER_01,
+            level: activeLevelRef.current,
             viewportWidth: viewportRef.current.w,
             viewportHeight: viewportRef.current.h,
             showPlayerNames: settingsRef.current.showPlayerNames,
+            colorblindShapes: settingsRef.current.colorblindShapes,
+            highContrast: settingsRef.current.highContrast,
             reducedMotion: settingsRef.current.reducedMotion,
+            emotesByPlayerId: emotesRef.current,
+            nowMs: Date.now(),
           });
         }
       }
@@ -272,7 +375,7 @@ export function GameStage({
 
     rafId = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(rafId);
-  }, [localUserId]);
+  }, [flushInput, localUserId, onSwapSolo]);
 
   const setTouchBit = (bit: number, active: boolean) => {
     soundRef.current?.unlock();
@@ -297,26 +400,46 @@ export function GameStage({
     return world.players.find((p) => p.id === targetId);
   }, [world, localUserId]);
 
+  const nextCampaignId = getNextLevelId(world.levelId);
+  const isProcedural = world.levelId.startsWith('procedural');
+  const displayTimeMs = world.completionTimeMs ?? world.elapsedMs;
+  const goldParRemaining =
+    world.modifier === 'speed_run'
+      ? Math.max(0, activeLevel.parTimeMs.gold - displayTimeMs)
+      : null;
+
   return (
     <section ref={stageRef} className="game-stage-fullscreen">
       <canvas
         ref={canvasRef}
         className="game-canvas-fullscreen"
-        aria-label="TOGETHER? Cooperative Puzzle Platformer Chamber 01"
+        aria-label={`TOGETHER? ${activeLevel.name} ${activeLevel.title}`}
       />
 
-      {/* Translucent Floating Top HUD (0 px lost from full-screen canvas!) */}
+      {/* Translucent Floating Top HUD */}
       <div className="floating-hud">
         <div className="hud-cluster">
-          <span className="hud-level-title">{LEVEL_CHAMBER_01.name}</span>
+          <span className="hud-level-title">
+            {activeLevel.name} · {activeLevel.title.toUpperCase()}
+          </span>
           <span className={`pill ${world.soloPractice ? 'pill-warning' : 'pill-accent'}`}>
             {world.soloPractice
               ? 'SOLO'
               : `CO-OP · ${world.players.filter((p) => p.connected).length}P`}
           </span>
+          {world.modifier !== 'standard' && (
+            <span className="pill pill-mint">
+              {world.modifier === 'low_gravity' ? 'LOW-G' : 'SPEED RUN'}
+            </span>
+          )}
           <span className="hud-stat">
-            <code>{formatTimer(world.completionTimeMs ?? world.elapsedMs)}</code>
+            <code>{formatTimer(displayTimeMs)}</code>
           </span>
+          {goldParRemaining !== null && (
+            <span className="hud-stat">
+              Gold Par <code>{formatTimer(goldParRemaining)}</code>
+            </span>
+          )}
           <span className="hud-stat hud-respawns">
             Respawns <code>{world.respawnCount}</code>
           </span>
@@ -350,6 +473,15 @@ export function GameStage({
           <button
             type="button"
             className="hud-btn hud-btn-icon"
+            onClick={() => setPauseOpen((v) => !v)}
+            title="Quick Settings (Esc)"
+            aria-label="Quick Settings"
+          >
+            <SettingsIcon width={15} height={15} />
+          </button>
+          <button
+            type="button"
+            className="hud-btn hud-btn-icon"
             onClick={toggleFullscreen}
             title="Toggle fullscreen"
             aria-label="Toggle fullscreen"
@@ -373,23 +505,43 @@ export function GameStage({
         </div>
       </div>
 
-      {/* Floating Bottom Control Hints / Touch Controls */}
+      {/* Floating Bottom Control Hints, Quick Emotes, and Mobile Touch Controls */}
       <div className="floating-bottom-controls">
-        <div className="desktop-hints-pill">
-          <span>
-            <code>A/D</code> Move
-          </span>
-          <span>
-            <code>Space</code> Jump &amp; Stack
-          </span>
-          {world.soloPractice && (
+        <div className="desktop-bottom-bar">
+          <div className="desktop-hints-pill">
             <span>
-              <code>Tab</code> Swap Partner
+              <code>A/D</code> Move
             </span>
-          )}
-          <span>
-            <code>R</code> Restart
-          </span>
+            <span>
+              <code>Space</code> Jump &amp; Stack
+            </span>
+            {world.soloPractice && (
+              <span>
+                <code>Tab</code> Swap
+              </span>
+            )}
+            <span>
+              <code>R</code> Restart
+            </span>
+            <span>
+              <code>Esc</code> Options
+            </span>
+          </div>
+
+          <div className="emote-bar" aria-label="Quick Emote Pings">
+            {EMOTE_PINGS.map((em) => (
+              <button
+                key={em.id}
+                type="button"
+                className="emote-chip"
+                onClick={() => onSendEmote(em.id)}
+                title={`Ping "${em.label}" (Key ${em.key})`}
+              >
+                <span className="emote-key">{em.key}</span>
+                {em.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="touch-controls" aria-label="Touch Controls">
@@ -444,13 +596,109 @@ export function GameStage({
         </div>
       </div>
 
+      {/* In-Game Quick Options Overlay (Esc) */}
+      {pauseOpen && world.status !== 'completed' && (
+        <div
+          className="victory-overlay"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPauseOpen(false);
+          }}
+        >
+          <div className="panel pause-card" role="dialog" aria-modal="true">
+            <div className="drawer-header">
+              <h2>Quick Options</h2>
+              <button
+                type="button"
+                className="icon-close-btn"
+                onClick={() => setPauseOpen(false)}
+                aria-label="Close options"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+            <div className="drawer-body settings-list">
+              <label className="setting-row surface">
+                <span>Sound Effects</span>
+                <input
+                  type="checkbox"
+                  checked={settings.soundEnabled}
+                  onChange={(e) => onUpdateSettings({ soundEnabled: e.target.checked })}
+                />
+              </label>
+              <label className="setting-row surface setting-row-col">
+                <div className="setting-row-top">
+                  <span>Volume</span>
+                  <code>{Math.round(settings.volume * 100)}%</code>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={Math.round(settings.volume * 100)}
+                  disabled={!settings.soundEnabled}
+                  onChange={(e) => onUpdateSettings({ volume: Number(e.target.value) / 100 })}
+                />
+              </label>
+              <label className="setting-row surface">
+                <span>Colorblind Player Shapes</span>
+                <input
+                  type="checkbox"
+                  checked={settings.colorblindShapes}
+                  onChange={(e) => onUpdateSettings({ colorblindShapes: e.target.checked })}
+                />
+              </label>
+              <label className="setting-row surface">
+                <span>High-Contrast Outlines</span>
+                <input
+                  type="checkbox"
+                  checked={settings.highContrast}
+                  onChange={(e) => onUpdateSettings({ highContrast: e.target.checked })}
+                />
+              </label>
+              <label className="setting-row surface">
+                <span>Reduced Motion</span>
+                <input
+                  type="checkbox"
+                  checked={settings.reducedMotion}
+                  onChange={(e) => onUpdateSettings({ reducedMotion: e.target.checked })}
+                />
+              </label>
+              <div className="victory-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => setPauseOpen(false)}
+                >
+                  Resume
+                </button>
+                {isHost && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => {
+                      setPauseOpen(false);
+                      onReturnLobby();
+                    }}
+                  >
+                    Main Menu
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Chamber Cleared Victory Overlay with Medals & Next Chamber Progression */}
       {world.status === 'completed' && (
         <div className="victory-overlay">
           <div className="panel victory-card">
-            <span className="pill pill-accent">CHAMBER CLEARED</span>
+            <span className={`pill pill-medal-${world.medal ?? 'bronze'}`}>
+              {(world.medal ?? 'bronze').toUpperCase()} MEDAL · {activeLevel.name}
+            </span>
             <h2 className="victory-title">TOGETHER!</h2>
             <p className="victory-subtitle">
-              All teammates unlocked the vault and reached the exit.
+              {activeLevel.title} cleared! Gold par: {formatTimer(activeLevel.parTimeMs.gold)}
             </p>
             <div className="victory-stats">
               <div className="surface stat-tile">
@@ -463,12 +711,37 @@ export function GameStage({
               </div>
             </div>
             <div className="victory-actions">
-              <button type="button" className="btn btn-primary" onClick={onRestartLevel}>
-                Play Again
+              {isHost && nextCampaignId && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => onStartNextLevel(nextCampaignId)}
+                >
+                  Next Chamber →
+                </button>
+              )}
+              {isHost && isProcedural && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    const nextSeed = Math.floor(100_000 + Math.random() * 899_999);
+                    onStartNextLevel(`procedural:${nextSeed}`, nextSeed);
+                  }}
+                >
+                  New Seed →
+                </button>
+              )}
+              <button
+                type="button"
+                className={`btn ${isHost && (nextCampaignId || isProcedural) ? 'btn-secondary' : 'btn-primary'}`}
+                onClick={onRestartLevel}
+              >
+                Replay
               </button>
               {isHost && (
                 <button type="button" className="btn btn-secondary" onClick={onReturnLobby}>
-                  Main Menu
+                  Menu
                 </button>
               )}
             </div>

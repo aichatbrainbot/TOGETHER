@@ -135,6 +135,30 @@ code {
   color: #ffa3b7;
 }
 
+.pill-mint {
+  background: rgba(84, 214, 197, 0.16);
+  border-color: rgba(84, 214, 197, 0.45);
+  color: #97ede1;
+}
+
+.pill-medal-gold {
+  background: rgba(255, 224, 102, 0.16);
+  border-color: rgba(255, 224, 102, 0.5);
+  color: #ffe066;
+}
+
+.pill-medal-silver {
+  background: rgba(199, 209, 230, 0.16);
+  border-color: rgba(199, 209, 230, 0.45);
+  color: #d6dfef;
+}
+
+.pill-medal-bronze {
+  background: rgba(224, 154, 107, 0.16);
+  border-color: rgba(224, 154, 107, 0.45);
+  color: #f0b68e;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -1238,5 +1262,229 @@ code {
   .pulse-bar::after {
     animation: none;
     width: 100%;
+  }
+}
+
+/* --- Phase 4 & 5 Chambers, Procedural Seed, Modifiers, Leaderboard, Emotes & Pause --- */
+.chamber-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.chamber-card-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.seed-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.seed-input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.modifier-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.modifier-chip {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.modifier-chip span {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.modifier-chip-active {
+  border-color: var(--accent-secondary);
+  background: rgba(84, 214, 197, 0.12);
+}
+
+.profile-box {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.profile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.profile-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.profile-stats-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.profile-stats-grid strong {
+  font-size: 1.05rem;
+}
+
+.medal-gold {
+  color: #ffe066;
+}
+
+.filter-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-pill {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.filter-pill-active {
+  border-color: var(--accent-primary);
+  background: rgba(139, 114, 255, 0.22);
+  color: var(--text-primary);
+}
+
+.leaderboard-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lb-row {
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lb-rank {
+  font-weight: 900;
+  font-size: 0.9rem;
+  color: var(--accent-secondary);
+  width: 28px;
+  flex-shrink: 0;
+}
+
+.lb-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.lb-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.lb-time {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.session-clear-row {
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.desktop-bottom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.emote-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  pointer-events: auto;
+}
+
+.emote-chip {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(139, 114, 255, 0.28);
+  background: rgba(20, 23, 33, 0.78);
+  color: var(--text-primary);
+  font-size: 0.7rem;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.emote-chip:hover {
+  border-color: var(--accent-secondary);
+  background: var(--surface);
+}
+
+.emote-key {
+  color: var(--accent-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.pause-card {
+  width: min(400px, 100%);
+  max-height: 90dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+@media (hover: none) and (pointer: coarse), (max-width: 720px) {
+  .desktop-bottom-bar {
+    display: none;
   }
 }

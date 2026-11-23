@@ -1,89 +1,24 @@
-import { getPaletteForSlot } from './constants.js';
+import { type ChallengeModifier, getPaletteForSlot } from './constants.js';
 import {
-  INPUT_BITS,
   LEVEL_CHAMBER_01,
-  type LevelDefinition,
-  PHYSICS,
-  type Rect,
+  computeMedal,
   getSpawnPositionForSlot,
-} from './level.js';
-
-export type SimEventType =
-  | 'jump'
-  | 'land'
-  | 'switch_on'
-  | 'bridge_on'
-  | 'bridge_lock'
-  | 'door_unlock'
-  | 'respawn'
-  | 'level_complete';
-
-export interface SimEvent {
-  type: SimEventType;
-  x: number;
-  y: number;
-  color?: string;
-  playerId?: string;
-}
-
-export interface SimPlayerState {
-  id: string;
-  displayName: string;
-  slot: number;
-  color: string;
-  badge: string;
-  isSoloPuppet: boolean;
-  connected: boolean;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  facing: 1 | -1;
-  grounded: boolean;
-  standingOnId: string | null;
-  coyoteTicks: number;
-  jumpBufferTicks: number;
-  prevJumpDown: boolean;
-  invulnTicks: number;
-  atExit: boolean;
-  lastProcessedSeq: number;
-}
-
-export interface SwitchRuntimeState {
-  id: string;
-  pressed: boolean;
-  latched: boolean;
-}
-
-export interface BridgeRuntimeState {
-  id: string;
-  active: boolean;
-  locked: boolean;
-}
-
-export interface ExitDoorRuntimeState {
-  unlocked: boolean;
-  chargeTicks: number;
-  chargeRequired: number;
-  playersInside: number;
-  playersRequired: number;
-  exitHoldTicks: number;
-}
-
-export interface GameWorldState {
-  levelId: string;
-  tick: number;
-  elapsedMs: number;
-  soloPractice: boolean;
-  soloActiveId: string | null;
-  status: 'playing' | 'completed';
-  completionTimeMs: number | null;
-  respawnCount: number;
-  players: SimPlayerState[];
-  switches: SwitchRuntimeState[];
-  bridges: BridgeRuntimeState[];
-  exitDoor: ExitDoorRuntimeState;
-}
+} from './levels/index.js';
+import {
+  type BridgeRuntimeState,
+  type CrateRuntimeState,
+  type GameWorldState,
+  INPUT_BITS,
+  type KeyRuntimeState,
+  type LevelDefinition,
+  type LockedGateRuntimeState,
+  type MovingPlatformRuntimeState,
+  PHYSICS,
+  type PlayerContribution,
+  type Rect,
+  type SimEvent,
+  type SimPlayerState,
+} from './types.js';
 
 export interface SimPlayerSeed {
   id: string;
@@ -113,9 +48,22 @@ function playerRect(p: { x: number; y: number }): { x: number; y: number; w: num
   };
 }
 
+function crateRect(c: CrateRuntimeState): { x: number; y: number; w: number; h: number } {
+  return { x: c.x, y: c.y, w: c.w, h: c.h };
+}
+
 function moveToward(current: number, target: number, maxDelta: number): number {
   if (Math.abs(target - current) <= maxDelta) return target;
   return current + Math.sign(target - current) * maxDelta;
+}
+
+function ensureContribution(world: GameWorldState, playerId: string): PlayerContribution {
+  let c = world.contributions[playerId];
+  if (!c) {
+    c = { switchesTriggered: 0, keysCollected: 0, respawns: 0 };
+    world.contributions[playerId] = c;
+  }
+  return c;
 }
 
 export function createPlayerEntity(level: LevelDefinition, seed: SimPlayerSeed): SimPlayerState {
@@ -136,6 +84,8 @@ export function createPlayerEntity(level: LevelDefinition, seed: SimPlayerSeed):
     facing: 1,
     grounded: false,
     standingOnId: null,
+    standingOnPlatformId: null,
+    standingOnCrateId: null,
     coyoteTicks: 0,
     jumpBufferTicks: 0,
     prevJumpDown: false,
@@ -147,10 +97,15 @@ export function createPlayerEntity(level: LevelDefinition, seed: SimPlayerSeed):
 
 export function createGameWorld(
   seeds: readonly SimPlayerSeed[],
-  options: { level?: LevelDefinition; soloPractice?: boolean } = {},
+  options: {
+    level?: LevelDefinition;
+    soloPractice?: boolean;
+    modifier?: ChallengeModifier;
+  } = {},
 ): GameWorldState {
   const level = options.level ?? LEVEL_CHAMBER_01;
   const soloPractice = Boolean(options.soloPractice);
+  const modifier: ChallengeModifier = options.modifier ?? 'standard';
 
   const players = seeds.map((s) => createPlayerEntity(level, s));
   if (soloPractice && players.length === 1) {
@@ -168,35 +123,94 @@ export function createGameWorld(
   }
 
   const activeCount = players.filter((p) => p.connected).length;
+  const contributions: Record<string, PlayerContribution> = {};
+  for (const p of players) {
+    contributions[p.id] = { switchesTriggered: 0, keysCollected: 0, respawns: 0 };
+  }
+
+  const movingPlatforms: MovingPlatformRuntimeState[] = level.movingPlatforms.map((mp) => {
+    const phase = mp.phaseOffset ?? 0;
+    const t = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
+    return {
+      id: mp.id,
+      x: mp.startX + (mp.endX - mp.startX) * t,
+      y: mp.startY + (mp.endY - mp.startY) * t,
+      dx: 0,
+      dy: 0,
+      w: mp.w,
+      h: mp.h,
+      progress: phase,
+      active: !mp.poweredBySwitchId,
+    };
+  });
+
+  const crates: CrateRuntimeState[] = level.crates.map((cr) => ({
+    id: cr.id,
+    x: cr.x,
+    y: cr.y,
+    vx: 0,
+    vy: 0,
+    w: cr.w,
+    h: cr.h,
+    requiredPushers: cr.requiredPushers,
+    activePushers: 0,
+    grounded: false,
+    standingOnPlatformId: null,
+  }));
+
+  const keys: KeyRuntimeState[] = level.keys.map((k) => ({
+    id: k.id,
+    x: k.x,
+    y: k.y,
+    carrierPlayerId: null,
+    used: false,
+  }));
+
+  const lockedGates: LockedGateRuntimeState[] = level.lockedGates.map((g) => ({
+    id: g.id,
+    unlocked: false,
+  }));
 
   return {
     levelId: level.id,
+    proceduralSeed: level.proceduralSeed ?? null,
+    modifier,
     tick: 0,
     elapsedMs: 0,
     soloPractice,
     soloActiveId: soloPractice ? (players[0]?.id ?? null) : null,
     status: 'playing',
     completionTimeMs: null,
+    medal: null,
     respawnCount: 0,
     players,
     switches: level.switches.map((sw) => ({
       id: sw.id,
       pressed: false,
       latched: false,
+      remainingTicks: 0,
+      maxTicks: sw.durationTicks ?? 0,
     })),
     bridges: level.bridges.map((br) => ({
       id: br.id,
       active: false,
       locked: false,
+      remainingTicks: 0,
+      maxTicks: 0,
     })),
+    movingPlatforms,
+    crates,
+    keys,
+    lockedGates,
     exitDoor: {
-      unlocked: false,
+      unlocked: !level.requiresVaultSwitches,
       chargeTicks: 0,
       chargeRequired: PHYSICS.VAULT_CHARGE_TICKS,
       playersInside: 0,
       playersRequired: Math.max(1, activeCount),
       exitHoldTicks: 0,
     },
+    contributions,
   };
 }
 
@@ -206,11 +220,18 @@ export function cloneGameWorld(world: GameWorldState): GameWorldState {
     players: world.players.map((p) => ({ ...p })),
     switches: world.switches.map((s) => ({ ...s })),
     bridges: world.bridges.map((b) => ({ ...b })),
+    movingPlatforms: world.movingPlatforms.map((m) => ({ ...m })),
+    crates: world.crates.map((c) => ({ ...c })),
+    keys: world.keys.map((k) => ({ ...k })),
+    lockedGates: world.lockedGates.map((g) => ({ ...g })),
     exitDoor: { ...world.exitDoor },
+    contributions: Object.fromEntries(
+      Object.entries(world.contributions).map(([k, v]) => [k, { ...v }]),
+    ),
   };
 }
 
-function getSolidRects(level: LevelDefinition, world: GameWorldState): Rect[] {
+function getStaticSolidRects(level: LevelDefinition, world: GameWorldState): Rect[] {
   const solids: Rect[] = [...level.solids];
   for (let i = 0; i < level.bridges.length; i += 1) {
     const def = level.bridges[i]!;
@@ -219,28 +240,38 @@ function getSolidRects(level: LevelDefinition, world: GameWorldState): Rect[] {
       solids.push(def);
     }
   }
+  for (let i = 0; i < level.lockedGates.length; i += 1) {
+    const def = level.lockedGates[i]!;
+    const state = world.lockedGates[i];
+    if (!state?.unlocked) {
+      solids.push(def);
+    }
+  }
   return solids;
 }
 
-function resolveHorizontalSolids(p: SimPlayerState, solids: readonly Rect[]): void {
-  const box = playerRect(p);
+function resolveBoxHorizontal(
+  box: { x: number; y: number; w: number; h: number },
+  solids: readonly Rect[],
+): boolean {
+  let hit = false;
   for (const solid of solids) {
     if (!rectsOverlap(box, solid)) continue;
     const overlapLeft = box.x + box.w - solid.x;
     const overlapRight = solid.x + solid.w - box.x;
     if (overlapLeft < overlapRight) {
-      p.x = solid.x - box.w;
+      box.x = solid.x - box.w;
     } else {
-      p.x = solid.x + solid.w;
+      box.x = solid.x + solid.w;
     }
-    p.vx = 0;
-    box.x = p.x;
+    hit = true;
   }
+  return hit;
 }
 
 /**
- * Advances the entire cooperative world by exactly one deterministic tick (1/60 s).
- * Mutates `world` in place and returns discrete gameplay events triggered during this tick.
+ * Advances the entire cooperative world by one deterministic tick (1/60 s).
+ * Mutates `world` in place and returns discrete gameplay events for VFX/audio.
  */
 export function stepGameWorld(
   world: GameWorldState,
@@ -254,23 +285,75 @@ export function stepGameWorld(
   }
 
   const dt = PHYSICS.DT;
+  const gravity =
+    world.modifier === 'low_gravity'
+      ? PHYSICS.GRAVITY * PHYSICS.LOW_GRAVITY_FACTOR
+      : PHYSICS.GRAVITY;
+
   world.tick += 1;
   world.elapsedMs = Math.round(world.tick * dt * 1000);
 
   const activePlayers = world.players.filter((p) => p.connected);
-  const solids = getSolidRects(level, world);
+  const switchById = new Map(world.switches.map((s) => [s.id, s]));
 
-  // Record previous tick standing relationships for smooth horizontal head-carry.
+  // Record previous tick standing relationships for smooth carry passes
   const prevStandingOn = new Map<string, string | null>();
-  const prevX = new Map<string, number>();
+  const prevStandingOnCrate = new Map<string, string | null>();
   const prevGrounded = new Map<string, boolean>();
   for (const p of activePlayers) {
     prevStandingOn.set(p.id, p.standingOnId);
-    prevX.set(p.id, p.x);
+    prevStandingOnCrate.set(p.id, p.standingOnCrateId);
     prevGrounded.set(p.id, p.grounded);
   }
 
-  // 1. Apply validated player inputs, coyote time, jump buffer, and gravity
+  // 1. Advance Moving Platforms & carry riding players and crates first
+  for (let i = 0; i < level.movingPlatforms.length; i += 1) {
+    const def = level.movingPlatforms[i]!;
+    const plat = world.movingPlatforms[i]!;
+    const prevX = plat.x;
+    const prevY = plat.y;
+
+    if (def.poweredBySwitchId) {
+      const sw = switchById.get(def.poweredBySwitchId);
+      plat.active = Boolean(sw?.pressed || sw?.latched || (sw && sw.remainingTicks > 0));
+    } else {
+      plat.active = true;
+    }
+
+    if (plat.active && def.cycleSeconds > 0) {
+      plat.progress = (plat.progress + dt / def.cycleSeconds) % 1;
+      const ease = 0.5 - 0.5 * Math.cos(plat.progress * Math.PI * 2);
+      plat.x = def.startX + (def.endX - def.startX) * ease;
+      plat.y = def.startY + (def.endY - def.startY) * ease;
+    }
+
+    plat.dx = plat.x - prevX;
+    plat.dy = plat.y - prevY;
+
+    if (plat.dx !== 0 || plat.dy !== 0) {
+      for (const p of activePlayers) {
+        if (p.standingOnPlatformId === plat.id) {
+          p.x += plat.dx;
+          p.y += plat.dy;
+        }
+      }
+      for (const c of world.crates) {
+        if (c.standingOnPlatformId === plat.id) {
+          c.x += plat.dx;
+          c.y += plat.dy;
+        }
+      }
+    }
+  }
+
+  const staticSolids = getStaticSolidRects(level, world);
+  const allSolidsWithPlatforms: Rect[] = [
+    ...staticSolids,
+    ...world.movingPlatforms.map((mp) => ({ x: mp.x, y: mp.y, w: mp.w, h: mp.h })),
+  ];
+
+  // 2. Apply validated player inputs, coyote time, jump buffer, and gravity
+  const intendedDirByPlayer = new Map<string, number>();
   for (const p of activePlayers) {
     if (p.invulnTicks > 0) p.invulnTicks -= 1;
 
@@ -288,6 +371,7 @@ export function stepGameWorld(
     p.prevJumpDown = jumpDown;
 
     const dir = (moveRight ? 1 : 0) - (moveLeft ? 1 : 0);
+    intendedDirByPlayer.set(p.id, dir);
     if (dir !== 0) {
       p.facing = dir > 0 ? 1 : -1;
     }
@@ -319,6 +403,8 @@ export function stepGameWorld(
       p.vy = PHYSICS.JUMP_VELOCITY;
       p.grounded = false;
       p.standingOnId = null;
+      p.standingOnPlatformId = null;
+      p.standingOnCrateId = null;
       p.coyoteTicks = 0;
       p.jumpBufferTicks = 0;
       events.push({
@@ -332,26 +418,134 @@ export function stepGameWorld(
       p.vy *= PHYSICS.JUMP_CUT_MULTIPLIER;
     }
 
-    p.vy = Math.min(PHYSICS.MAX_FALL_SPEED, p.vy + PHYSICS.GRAVITY * dt);
+    p.vy = Math.min(PHYSICS.MAX_FALL_SPEED, p.vy + gravity * dt);
   }
 
-  // 2. Horizontal movement in bottom-to-top order so stacked riders inherit horizontal carry smoothly
+  // 3. Evaluate Cooperative Pushable Crates (x1 and x2 pushers)
+  const crateDeltaX = new Map<string, number>();
+  for (let i = 0; i < world.crates.length; i += 1) {
+    const crate = world.crates[i]!;
+    const startCrateX = crate.x;
+
+    let pushRight = 0;
+    let pushLeft = 0;
+
+    for (const p of activePlayers) {
+      const dir = intendedDirByPlayer.get(p.id) ?? 0;
+      if (dir === 0) continue;
+
+      const verticalOverlap =
+        Math.min(p.y + PHYSICS.PLAYER_HEIGHT, crate.y + crate.h) - Math.max(p.y, crate.y);
+      if (verticalOverlap < 6) continue;
+
+      // Pushing right against crate's left side (allow slight chain distance when 2 players push together)
+      if (dir > 0 && p.x + PHYSICS.PLAYER_WIDTH >= crate.x - 24 && p.x < crate.x + crate.w / 2) {
+        pushRight += 1;
+      } else if (
+        dir < 0 &&
+        p.x <= crate.x + crate.w + 24 &&
+        p.x + PHYSICS.PLAYER_WIDTH > crate.x + crate.w / 2
+      ) {
+        pushLeft += 1;
+      }
+    }
+
+    const effectiveReq = world.soloPractice ? 1 : crate.requiredPushers;
+    crate.activePushers = Math.max(pushRight, pushLeft);
+
+    if (pushRight >= effectiveReq && pushLeft === 0) {
+      crate.vx = PHYSICS.CRATE_PUSH_SPEED;
+    } else if (pushLeft >= effectiveReq && pushRight === 0) {
+      crate.vx = -PHYSICS.CRATE_PUSH_SPEED;
+    } else {
+      crate.vx = moveToward(crate.vx, 0, PHYSICS.CRATE_FRICTION * dt);
+    }
+
+    crate.vy = Math.min(PHYSICS.MAX_FALL_SPEED, crate.vy + gravity * dt);
+
+    // Crate horizontal move
+    crate.x += crate.vx * dt;
+    const cBoxX = crateRect(crate);
+    const otherCrates = world.crates
+      .filter((other) => other.id !== crate.id)
+      .map((other) => crateRect(other));
+    if (resolveBoxHorizontal(cBoxX, [...staticSolids, ...otherCrates])) {
+      crate.x = cBoxX.x;
+      crate.vx = 0;
+    }
+    crateDeltaX.set(crate.id, crate.x - startCrateX);
+
+    // Crate vertical move
+    const prevBottom = crate.y + crate.h;
+    crate.grounded = false;
+    crate.standingOnPlatformId = null;
+    crate.y += crate.vy * dt;
+    const cBoxY = crateRect(crate);
+
+    for (const solid of staticSolids) {
+      if (!rectsOverlap(cBoxY, solid)) continue;
+      if (crate.vy >= 0 && prevBottom <= solid.y + 10) {
+        crate.y = solid.y - crate.h;
+        crate.vy = 0;
+        crate.grounded = true;
+      } else if (crate.vy < 0) {
+        crate.y = solid.y + solid.h;
+        crate.vy = 0;
+      }
+      cBoxY.y = crate.y;
+    }
+
+    for (const mp of world.movingPlatforms) {
+      const mRect: Rect = { x: mp.x, y: mp.y, w: mp.w, h: mp.h };
+      if (!rectsOverlap(cBoxY, mRect)) continue;
+      if (crate.vy >= 0 && prevBottom <= mp.y + 12) {
+        crate.y = mp.y - crate.h;
+        crate.vy = 0;
+        crate.grounded = true;
+        crate.standingOnPlatformId = mp.id;
+        cBoxY.y = crate.y;
+      }
+    }
+
+    // Crate hazard respawn safety (never soft-lock!)
+    const fellOut = crate.y > level.height + 24;
+    const hitHazard = level.hazards.some((h) => rectsOverlap(crateRect(crate), h));
+    if (fellOut || hitHazard) {
+      const def = level.crates[i]!;
+      crate.x = def.x;
+      crate.y = def.y;
+      crate.vx = 0;
+      crate.vy = 0;
+      crate.grounded = false;
+      crate.standingOnPlatformId = null;
+    }
+  }
+
+  // 4. Horizontal movement for players (bottom-to-top for head-carry & crate-top carry)
   const bottomToTop = [...activePlayers].sort(
     (a, b) => b.y - a.y || a.slot - b.slot || a.id.localeCompare(b.id),
   );
   const deltaXById = new Map<string, number>();
+  const crateRects: Rect[] = world.crates.map((c) => crateRect(c));
+  const playerHorizSolids: Rect[] = [...allSolidsWithPlatforms, ...crateRects];
 
   for (const p of bottomToTop) {
     const startX = p.x;
     const carrierId = prevStandingOn.get(p.id);
-    const carryDx = carrierId ? (deltaXById.get(carrierId) ?? 0) : 0;
+    const carryFromPlayer = carrierId ? (deltaXById.get(carrierId) ?? 0) : 0;
+    const carrierCrateId = prevStandingOnCrate.get(p.id);
+    const carryFromCrate = carrierCrateId ? (crateDeltaX.get(carrierCrateId) ?? 0) : 0;
 
-    p.x += p.vx * dt + carryDx;
-    resolveHorizontalSolids(p, solids);
+    p.x += p.vx * dt + carryFromPlayer + carryFromCrate;
+    const pBox = playerRect(p);
+    if (resolveBoxHorizontal(pBox, playerHorizSolids)) {
+      p.x = pBox.x;
+      p.vx = 0;
+    }
     deltaXById.set(p.id, p.x - startX);
   }
 
-  // 3. Gentle horizontal player-vs-player body separation (only when genuinely overlapping vertically > 4 px)
+  // 5. Gentle player-vs-player horizontal separation (only when genuinely overlapping vertically > 4 px)
   for (let pass = 0; pass < 2; pass += 1) {
     for (let i = 0; i < bottomToTop.length; i += 1) {
       for (let j = i + 1; j < bottomToTop.length; j += 1) {
@@ -372,13 +566,16 @@ export function stepGameWorld(
 
         a.x += dir * halfPush;
         b.x -= dir * halfPush;
-        resolveHorizontalSolids(a, solids);
-        resolveHorizontalSolids(b, solids);
+
+        const boxA = playerRect(a);
+        if (resolveBoxHorizontal(boxA, playerHorizSolids)) a.x = boxA.x;
+        const boxB = playerRect(b);
+        if (resolveBoxHorizontal(boxB, playerHorizSolids)) b.x = boxB.x;
       }
     }
   }
 
-  // 4. Vertical movement + solid surfaces + bottom-to-top head stacking
+  // 6. Vertical movement + solids + moving platforms + crates + bottom-to-top head stacking
   const settled: SimPlayerState[] = [];
   for (const p of bottomToTop) {
     const prevTop = p.y;
@@ -386,11 +583,14 @@ export function stepGameWorld(
 
     p.grounded = false;
     p.standingOnId = null;
+    p.standingOnPlatformId = null;
+    p.standingOnCrateId = null;
     p.y += p.vy * dt;
 
-    // Resolve against solid level geometry & active bridges
     const box = playerRect(p);
-    for (const solid of solids) {
+
+    // 6a. Static level geometry, active bridges, and closed gates
+    for (const solid of staticSolids) {
       if (!rectsOverlap(box, solid)) continue;
       if (p.vy >= 0 && prevBottom <= solid.y + 8) {
         p.y = solid.y - PHYSICS.PLAYER_HEIGHT;
@@ -400,7 +600,6 @@ export function stepGameWorld(
         p.y = solid.y + solid.h;
         p.vy = 0;
       } else {
-        // Fallback minimum push out (e.g. bridge materialized around feet)
         const pushUp = box.y + box.h - solid.y;
         const pushDown = solid.y + solid.h - box.y;
         if (pushUp <= pushDown) {
@@ -415,20 +614,50 @@ export function stepGameWorld(
       box.y = p.y;
     }
 
-    // Resolve vertical stacking on already-settled lower players
+    // 6b. Moving platforms
+    for (const mp of world.movingPlatforms) {
+      const mRect: Rect = { x: mp.x, y: mp.y, w: mp.w, h: mp.h };
+      if (!rectsOverlap(box, mRect)) continue;
+      if (p.vy >= 0 && prevBottom <= mp.y + Math.max(10, Math.abs(mp.dy) + 8)) {
+        p.y = mp.y - PHYSICS.PLAYER_HEIGHT;
+        p.vy = 0;
+        p.grounded = true;
+        p.standingOnPlatformId = mp.id;
+      } else if (p.vy < 0 && prevTop >= mp.y + mp.h - 10) {
+        p.y = mp.y + mp.h;
+        p.vy = 0;
+      }
+      box.y = p.y;
+    }
+
+    // 6c. Pushable crates (standable tops!)
+    for (const cr of world.crates) {
+      const cRect = crateRect(cr);
+      if (!rectsOverlap(box, cRect)) continue;
+      if (p.vy >= 0 && prevBottom <= cr.y + 10) {
+        p.y = cr.y - PHYSICS.PLAYER_HEIGHT;
+        p.vy = 0;
+        p.grounded = true;
+        p.standingOnCrateId = cr.id;
+      } else if (p.vy < 0 && prevTop >= cr.y + cr.h - 8) {
+        p.y = cr.y + cr.h;
+        p.vy = 0;
+      }
+      box.y = p.y;
+    }
+
+    // 6d. Player-on-player head stacking
     for (const other of settled) {
       const horizOverlap =
         p.x + PHYSICS.PLAYER_WIDTH > other.x + 2 && p.x < other.x + PHYSICS.PLAYER_WIDTH - 2;
       if (!horizOverlap) continue;
 
-      // Landing on top of another player's head
       if (p.vy >= 0 && prevBottom <= other.y + 8 && p.y + PHYSICS.PLAYER_HEIGHT >= other.y) {
         p.y = other.y - PHYSICS.PLAYER_HEIGHT;
         p.vy = Math.min(0, other.vy);
         p.grounded = true;
         p.standingOnId = other.id;
       } else if (
-        // Rising into the underside of a player above
         p.vy < 0 &&
         prevTop >= other.y + PHYSICS.PLAYER_HEIGHT - 8 &&
         p.y <= other.y + PHYSICS.PLAYER_HEIGHT
@@ -451,7 +680,7 @@ export function stepGameWorld(
     settled.push(p);
   }
 
-  // 5. Evaluate hazards & void respawn
+  // 7. Hazards & Respawn (including safe Key drop back to spawn!)
   for (const p of activePlayers) {
     const box = playerRect(p);
     const fellOut = p.y > level.height + 24;
@@ -471,12 +700,94 @@ export function stepGameWorld(
       p.vy = 0;
       p.grounded = false;
       p.standingOnId = null;
+      p.standingOnPlatformId = null;
+      p.standingOnCrateId = null;
       p.invulnTicks = PHYSICS.RESPAWN_INVULN_TICKS;
       world.respawnCount += 1;
+      ensureContribution(world, p.id).respawns += 1;
+
+      // Return any key carried by this player back to its spawn pad cleanly
+      for (let kIdx = 0; kIdx < world.keys.length; kIdx += 1) {
+        const k = world.keys[kIdx]!;
+        if (k.carrierPlayerId === p.id && !k.used) {
+          const def = level.keys[kIdx]!;
+          k.carrierPlayerId = null;
+          k.x = def.x;
+          k.y = def.y;
+        }
+      }
     }
   }
 
-  // 6. Evaluate switches (hold, latch, and dual vault plates)
+  // 8. Keys & Locked Gates
+  const playerById = new Map(activePlayers.map((p) => [p.id, p]));
+  for (let i = 0; i < level.keys.length; i += 1) {
+    const def = level.keys[i]!;
+    const key = world.keys[i]!;
+    if (key.used) continue;
+
+    // Reset key if its carrier disconnected
+    if (key.carrierPlayerId && !playerById.has(key.carrierPlayerId)) {
+      key.carrierPlayerId = null;
+      key.x = def.x;
+      key.y = def.y;
+    }
+
+    if (!key.carrierPlayerId) {
+      const pickupRect: Rect = { x: key.x - 10, y: key.y - 10, w: 20, h: 20 };
+      const picker = activePlayers.find((p) => rectsOverlap(playerRect(p), pickupRect));
+      if (picker) {
+        key.carrierPlayerId = picker.id;
+        ensureContribution(world, picker.id).keysCollected += 1;
+        events.push({
+          type: 'key_pickup',
+          x: key.x,
+          y: key.y,
+          color: def.accent === 'mint' ? '#54D6C5' : '#8B72FF',
+          playerId: picker.id,
+        });
+      }
+    }
+
+    if (key.carrierPlayerId) {
+      const carrier = playerById.get(key.carrierPlayerId);
+      if (carrier) {
+        const targetX = carrier.x + PHYSICS.PLAYER_WIDTH / 2 - carrier.facing * 14;
+        const targetY = carrier.y - 4;
+        key.x += (targetX - key.x) * 0.28;
+        key.y += (targetY - key.y) * 0.28;
+
+        // Check proximity to linked Locked Gate
+        const gateIdx = level.lockedGates.findIndex((g) => g.id === def.unlocksGateId);
+        if (gateIdx >= 0) {
+          const gateDef = level.lockedGates[gateIdx]!;
+          const gateState = world.lockedGates[gateIdx]!;
+          if (!gateState.unlocked) {
+            const unlockZone: Rect = {
+              x: gateDef.x - 16,
+              y: gateDef.y - 8,
+              w: gateDef.w + 32,
+              h: gateDef.h + 16,
+            };
+            if (rectsOverlap(playerRect(carrier), unlockZone)) {
+              gateState.unlocked = true;
+              key.used = true;
+              key.carrierPlayerId = null;
+              events.push({
+                type: 'gate_unlock',
+                x: gateDef.x + gateDef.w / 2,
+                y: gateDef.y + gateDef.h / 2,
+                color: gateDef.accent === 'mint' ? '#54D6C5' : '#8B72FF',
+                playerId: carrier.id,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 9. Switches (Hold, Latch, Timed, Vault — activated by players AND crates where allowed)
   for (let i = 0; i < level.switches.length; i += 1) {
     const def = level.switches[i]!;
     const state = world.switches[i]!;
@@ -489,34 +800,78 @@ export function stepGameWorld(
 
     const wasPressed = state.pressed;
     const wasLatched = state.latched;
-    const nowPressed = activePlayers.some((p) => rectsOverlap(playerRect(p), triggerZone));
 
+    const triggeringPlayer = activePlayers.find((p) => rectsOverlap(playerRect(p), triggerZone));
+    const crateAllowed = def.allowsCrate !== false;
+    const cratePressing =
+      crateAllowed && world.crates.some((c) => rectsOverlap(crateRect(c), triggerZone));
+
+    const nowPressed = Boolean(triggeringPlayer || cratePressing);
     state.pressed = nowPressed;
+
     if (def.kind === 'latch' && nowPressed) {
       state.latched = true;
     }
 
+    if (def.kind === 'timed') {
+      const duration = def.durationTicks ?? 300;
+      state.maxTicks = duration;
+      if (nowPressed) {
+        state.remainingTicks = duration;
+      } else if (state.remainingTicks > 0) {
+        state.remainingTicks -= 1;
+      }
+    }
+
     if (nowPressed && !wasPressed) {
+      if (triggeringPlayer) {
+        ensureContribution(world, triggeringPlayer.id).switchesTriggered += 1;
+      }
       events.push({
         type: def.kind === 'latch' && !wasLatched ? 'bridge_lock' : 'switch_on',
         x: def.x + def.w / 2,
         y: def.y,
         color: def.accent === 'mint' ? '#54D6C5' : '#8B72FF',
+        playerId: triggeringPlayer?.id,
       });
     }
   }
 
-  // 7. Update bridges from linked switches
-  const switchById = new Map(world.switches.map((s) => [s.id, s]));
+  // Also check switch-controlled locked gates if any exist
+  for (let i = 0; i < level.lockedGates.length; i += 1) {
+    const def = level.lockedGates[i]!;
+    const gate = world.lockedGates[i]!;
+    if (def.unlockedBySwitchId && !gate.unlocked) {
+      const sw = world.switches.find((s) => s.id === def.unlockedBySwitchId);
+      if (sw?.pressed || sw?.latched) {
+        gate.unlocked = true;
+        events.push({
+          type: 'gate_unlock',
+          x: def.x + def.w / 2,
+          y: def.y + def.h / 2,
+          color: def.accent === 'mint' ? '#54D6C5' : '#8B72FF',
+        });
+      }
+    }
+  }
+
+  // 10. Bridges (hold, latched, or timed)
+  const freshSwitchById = new Map(world.switches.map((s) => [s.id, s]));
   for (let i = 0; i < level.bridges.length; i += 1) {
     const def = level.bridges[i]!;
-    const state = world.bridges[i]!;
+    const state: BridgeRuntimeState = world.bridges[i]!;
     const wasActive = state.active;
-    const holdSw = switchById.get(def.poweredBySwitchId);
-    const lockSw = switchById.get(def.latchedBySwitchId);
+
+    const holdSw = freshSwitchById.get(def.poweredBySwitchId);
+    const lockSw = def.latchedBySwitchId ? freshSwitchById.get(def.latchedBySwitchId) : undefined;
+    const timedSw = def.timedBySwitchId ? freshSwitchById.get(def.timedBySwitchId) : undefined;
 
     state.locked = Boolean(lockSw?.latched);
-    state.active = Boolean(holdSw?.pressed || state.locked);
+    state.remainingTicks = timedSw ? timedSw.remainingTicks : 0;
+    state.maxTicks = timedSw ? timedSw.maxTicks : 0;
+    state.active = Boolean(
+      holdSw?.pressed || state.locked || (timedSw && timedSw.remainingTicks > 0),
+    );
 
     if (state.active && !wasActive) {
       events.push({
@@ -528,33 +883,35 @@ export function stepGameWorld(
     }
   }
 
-  // 8. Evaluate simultaneous dual vault pressure plates -> Exit Door unlock
-  const vaultSwitches = level.switches
-    .filter((sw) => sw.kind === 'vault')
-    .map((sw) => switchById.get(sw.id));
+  // 11. Simultaneous Dual Vault Switches -> Exit Door unlock
+  if (level.requiresVaultSwitches && !world.exitDoor.unlocked) {
+    const vaultSwitches = level.switches
+      .filter((sw) => sw.kind === 'vault')
+      .map((sw) => freshSwitchById.get(sw.id));
 
-  if (!world.exitDoor.unlocked && vaultSwitches.length > 0) {
-    const allVaultPressed = vaultSwitches.every((sw) => sw?.pressed);
-    if (allVaultPressed) {
-      world.exitDoor.chargeTicks = Math.min(
-        world.exitDoor.chargeRequired,
-        world.exitDoor.chargeTicks + 1,
-      );
-      if (world.exitDoor.chargeTicks >= world.exitDoor.chargeRequired) {
-        world.exitDoor.unlocked = true;
-        events.push({
-          type: 'door_unlock',
-          x: level.exitDoor.x + level.exitDoor.w / 2,
-          y: level.exitDoor.y + level.exitDoor.h / 2,
-          color: '#54D6C5',
-        });
+    if (vaultSwitches.length > 0) {
+      const allVaultPressed = vaultSwitches.every((sw) => sw?.pressed);
+      if (allVaultPressed) {
+        world.exitDoor.chargeTicks = Math.min(
+          world.exitDoor.chargeRequired,
+          world.exitDoor.chargeTicks + 1,
+        );
+        if (world.exitDoor.chargeTicks >= world.exitDoor.chargeRequired) {
+          world.exitDoor.unlocked = true;
+          events.push({
+            type: 'door_unlock',
+            x: level.exitDoor.x + level.exitDoor.w / 2,
+            y: level.exitDoor.y + level.exitDoor.h / 2,
+            color: '#54D6C5',
+          });
+        }
+      } else if (world.exitDoor.chargeTicks > 0) {
+        world.exitDoor.chargeTicks -= 1;
       }
-    } else if (world.exitDoor.chargeTicks > 0) {
-      world.exitDoor.chargeTicks -= 1;
     }
   }
 
-  // 9. Evaluate exit door win condition (all active connected players at unlocked exit)
+  // 12. Exit Door win condition (all active connected players inside unlocked exit)
   let insideCount = 0;
   for (const p of world.players) {
     if (!p.connected) {
@@ -577,6 +934,7 @@ export function stepGameWorld(
     if (world.exitDoor.exitHoldTicks >= PHYSICS.EXIT_HOLD_TICKS) {
       world.status = 'completed';
       world.completionTimeMs = world.elapsedMs;
+      world.medal = computeMedal(level, world.elapsedMs);
       events.push({
         type: 'level_complete',
         x: level.exitDoor.x + level.exitDoor.w / 2,

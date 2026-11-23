@@ -1,5 +1,15 @@
-import type { ActivityPlayer, ActivityRoomState } from '@together/game-core';
-import { useState } from 'react';
+import {
+  type ActivityPlayer,
+  type ActivityRoomState,
+  CAMPAIGN_LEVELS,
+  CHALLENGE_MODIFIERS,
+  type ChallengeModifier,
+  type LeaderboardEntry,
+  type PlayerProfileStats,
+  normalizeProceduralSeed,
+  resolveLevel,
+} from '@together/game-core';
+import { useEffect, useMemo, useState } from 'react';
 import type { ActivitySessionContext, DiscordUserSummary } from '../discord/activityClient.js';
 import type { GameSettings } from '../game/settings.js';
 import type { ConnectionState } from '../net/ActivitySocket.js';
@@ -7,11 +17,13 @@ import {
   ChambersIcon,
   CloseIcon,
   CrownIcon,
+  DiceIcon,
   InfoIcon,
   PlayIcon,
   SettingsIcon,
   SignalIcon,
   TogetherCrest,
+  TrophyIcon,
   UsersIcon,
 } from './Icons.js';
 import { MenuBackdropCanvas } from './MenuBackdropCanvas.js';
@@ -36,16 +48,33 @@ interface GameMenuProps {
   eventLog: readonly EventLogItem[];
   settings: GameSettings;
   onUpdateSettings: (patch: Partial<GameSettings>) => void;
-  onStartGame: () => void;
+  onSelectLevel: (params: {
+    levelId: string;
+    proceduralSeed?: number | null;
+    modifier?: ChallengeModifier;
+  }) => void;
+  onStartGame: (options?: {
+    levelId?: string;
+    proceduralSeed?: number | null;
+    modifier?: ChallengeModifier;
+  }) => void;
   onToggleReady: () => void;
   onReconnect: () => void;
 }
 
-type ActivePanel = null | 'squad' | 'chambers' | 'settings' | 'howto';
+type ActivePanel = null | 'squad' | 'chambers' | 'leaderboard' | 'settings' | 'howto';
 
 function shortId(id: string): string {
   if (id.length <= 16) return id;
   return `${id.slice(0, 8)}…${id.slice(-6)}`;
+}
+
+function formatMs(ms: number): string {
+  const totalSec = ms / 1000;
+  const mins = Math.floor(totalSec / 60);
+  const secs = Math.floor(totalSec % 60);
+  const tenths = Math.floor((ms % 1000) / 100);
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${tenths}`;
 }
 
 export function GameMenu({
@@ -61,15 +90,73 @@ export function GameMenu({
   eventLog,
   settings,
   onUpdateSettings,
+  onSelectLevel,
   onStartGame,
   onToggleReady,
   onReconnect,
 }: GameMenuProps) {
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
+  const [seedInput, setSeedInput] = useState<string>(() =>
+    String(room?.selectedSeed ?? 428109),
+  );
+  const [lbFilter, setLbFilter] = useState<string>('all');
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [profile, setProfile] = useState<PlayerProfileStats | null>(null);
+  const [loadingStats, setLoadingStats] = useState(false);
 
   const isHost = Boolean(selfPlayer?.isHost);
   const isSolo = connectedPlayers.length <= 1;
   const hostPlayer = room?.players.find((p) => p.isHost);
+
+  const selectedLevel = useMemo(
+    () => resolveLevel(room?.selectedLevelId ?? 'chamber-01', room?.selectedSeed),
+    [room?.selectedLevelId, room?.selectedSeed],
+  );
+  const activeModifier: ChallengeModifier = room?.modifier ?? 'standard';
+
+  // Close drawer cleanly on Escape key
+  useEffect(() => {
+    if (!activePanel) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActivePanel(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activePanel]);
+
+  // Fetch real Leaderboard & Player Profile from server when Leaderboard drawer opens
+  useEffect(() => {
+    if (activePanel !== 'leaderboard') return;
+    let active = true;
+    const apiPrefix = context.mode === 'discord' ? '/.proxy/api' : '/api';
+    const levelQuery = lbFilter === 'all' ? '' : `?levelId=${encodeURIComponent(lbFilter)}`;
+
+    setLoadingStats(true);
+    Promise.all([
+      fetch(`${apiPrefix}/leaderboard${levelQuery}`).then((r) =>
+        r.ok ? (r.json() as Promise<{ entries?: LeaderboardEntry[] }>) : { entries: [] },
+      ),
+      fetch(`${apiPrefix}/profile/${encodeURIComponent(context.user.id)}`).then((r) =>
+        r.ok ? (r.json() as Promise<{ profile?: PlayerProfileStats | null }>) : { profile: null },
+      ),
+    ])
+      .then(([lbRes, profRes]) => {
+        if (!active) return;
+        setLeaderboard(lbRes.entries ?? []);
+        setProfile(profRes.profile ?? null);
+      })
+      .catch(() => {
+        if (!active) return;
+        setLeaderboard([]);
+      })
+      .finally(() => {
+        if (active) setLoadingStats(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activePanel, lbFilter, context.mode, context.user.id]);
 
   const handlePrimaryPlay = () => {
     if (isHost) {
@@ -85,6 +172,21 @@ export function GameMenu({
     } else {
       void document.exitFullscreen?.().catch(() => {});
     }
+  };
+
+  const handleRandomSeed = () => {
+    const next = Math.floor(100_000 + Math.random() * 899_999);
+    setSeedInput(String(next));
+    if (isHost) {
+      onSelectLevel({ levelId: `procedural:${next}`, proceduralSeed: next });
+    }
+  };
+
+  const handleLaunchProcedural = () => {
+    const normalized = normalizeProceduralSeed(seedInput);
+    setSeedInput(String(normalized));
+    setActivePanel(null);
+    onStartGame({ levelId: `procedural:${normalized}`, proceduralSeed: normalized });
   };
 
   return (
@@ -167,15 +269,22 @@ export function GameMenu({
                     : 'Ready Up'}
               </strong>
               <small>
-                {isHost
-                  ? isSolo
-                    ? 'Chamber 01 · Solo Practice'
-                    : `Chamber 01 · ${readyCount}/${connectedPlayers.length} Ready`
-                  : selfPlayer?.ready
-                    ? 'Waiting for Host to launch'
-                    : 'Confirm ready for Chamber 01'}
+                {selectedLevel.name} · {selectedLevel.title}
+                {activeModifier !== 'standard' ? ` · ${activeModifier.replace('_', ' ')}` : ''}
               </small>
             </span>
+          </button>
+
+          <button
+            type="button"
+            className={`menu-btn ${activePanel === 'chambers' ? 'menu-btn-active' : ''}`}
+            onClick={() => setActivePanel(activePanel === 'chambers' ? null : 'chambers')}
+          >
+            <span className="menu-btn-icon">
+              <ChambersIcon />
+            </span>
+            <span className="menu-btn-label">Chambers</span>
+            <span className="menu-btn-badge">{selectedLevel.order <= 9 ? `0${selectedLevel.order}` : '∞'}</span>
           </button>
 
           <button
@@ -194,14 +303,16 @@ export function GameMenu({
 
           <button
             type="button"
-            className={`menu-btn ${activePanel === 'chambers' ? 'menu-btn-active' : ''}`}
-            onClick={() => setActivePanel(activePanel === 'chambers' ? null : 'chambers')}
+            className={`menu-btn ${activePanel === 'leaderboard' ? 'menu-btn-active' : ''}`}
+            onClick={() => setActivePanel(activePanel === 'leaderboard' ? null : 'leaderboard')}
           >
             <span className="menu-btn-icon">
-              <ChambersIcon />
+              <TrophyIcon />
             </span>
-            <span className="menu-btn-label">Chambers</span>
-            <span className="menu-btn-badge">01</span>
+            <span className="menu-btn-label">Leaderboard</span>
+            {(room?.sessionClears.length ?? 0) > 0 && (
+              <span className="menu-btn-badge">{room?.sessionClears.length}</span>
+            )}
           </button>
 
           <button
@@ -257,7 +368,7 @@ export function GameMenu({
         </div>
       </footer>
 
-      {/* Slide-Over Panel / Modal Overlay for Squad, Chambers, Settings, How To Play */}
+      {/* Slide-Over Panel / Modal Overlay */}
       {activePanel && (
         <div
           className="menu-drawer-backdrop"
@@ -268,9 +379,11 @@ export function GameMenu({
           <aside className="panel menu-drawer" role="dialog" aria-modal="true">
             <div className="drawer-header">
               <h2>
-                {activePanel === 'squad' && `Squad Lobby (${connectedPlayers.length}/${room?.maxPlayers ?? 8})`}
-                {activePanel === 'chambers' && 'Chambers'}
-                {activePanel === 'settings' && 'Settings'}
+                {activePanel === 'squad' &&
+                  `Squad Lobby (${connectedPlayers.length}/${room?.maxPlayers ?? 8})`}
+                {activePanel === 'chambers' && 'Select Chamber & Modifiers'}
+                {activePanel === 'leaderboard' && 'Leaderboard & Profile'}
+                {activePanel === 'settings' && 'Settings & Accessibility'}
                 {activePanel === 'howto' && 'How to Play'}
               </h2>
               <button
@@ -373,11 +486,33 @@ export function GameMenu({
                   )}
                 </div>
 
+                {(room?.sessionClears.length ?? 0) > 0 && (
+                  <div className="drawer-section">
+                    <h3 className="section-title">This Session&apos;s Clears</h3>
+                    <ul className="event-log">
+                      {room!.sessionClears.slice(0, 5).map((cl, idx) => (
+                        <li key={`${cl.levelId}-${cl.clearedAt}-${idx}`} className="session-clear-row">
+                          <div>
+                            <strong>{cl.levelName}</strong>
+                            <span className="log-time">
+                              {' '}
+                              · {formatMs(cl.completionTimeMs)} · {cl.respawnCount} respawns
+                            </span>
+                          </div>
+                          <span className={`pill pill-medal-${cl.medal}`}>
+                            {cl.medal.toUpperCase()}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 <div className="drawer-section">
                   <h3 className="section-title">
-                    Session Diagnostics ({sdkParticipants.length} SDK detected · {context.platform})
+                    Diagnostics ({sdkParticipants.length} SDK · {context.platform})
                   </h3>
-                  <ul className="event-log compact-log">
+                  <ul className="event-log">
                     {eventLog.map((item) => (
                       <li key={item.id}>
                         <span className="log-time">{item.time}</span>
@@ -391,48 +526,223 @@ export function GameMenu({
 
             {activePanel === 'chambers' && (
               <div className="drawer-body">
-                <div className="chamber-card surface chamber-card-live">
+                {!isHost && (
+                  <p className="muted-note">
+                    Only the Host (<strong>{hostPlayer?.displayName ?? 'Host'}</strong>) can change
+                    the active chamber and modifier.
+                  </p>
+                )}
+
+                {CAMPAIGN_LEVELS.map((lvl) => {
+                  const isSelected = selectedLevel.id === lvl.id;
+                  return (
+                    <div
+                      key={lvl.id}
+                      className={`chamber-card surface ${isSelected ? 'chamber-card-live' : ''}`}
+                    >
+                      <div className="chamber-card-head">
+                        <strong>
+                          {lvl.name} · {lvl.title}
+                        </strong>
+                        <span className="pill pill-accent">{lvl.mechanicTag}</span>
+                      </div>
+                      <p className="muted-note">{lvl.subtitle}</p>
+                      <div className="chamber-card-foot">
+                        <span className="log-time">
+                          Gold Par: {formatMs(lvl.parTimeMs.gold)}
+                        </span>
+                        {isHost && (
+                          <div className="chamber-card-btns">
+                            {!isSelected && (
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-compact"
+                                onClick={() => onSelectLevel({ levelId: lvl.id })}
+                              >
+                                Select
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-compact"
+                              onClick={() => {
+                                setActivePanel(null);
+                                onStartGame({ levelId: lvl.id });
+                              }}
+                            >
+                              Play
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Deterministic Procedural Lab (Zero AI!) */}
+                <div
+                  className={`chamber-card surface ${
+                    selectedLevel.id.startsWith('procedural:') ? 'chamber-card-live' : ''
+                  }`}
+                >
                   <div className="chamber-card-head">
-                    <strong>Chamber 01 · Synchrony</strong>
-                    <span className="pill pill-accent">PLAYABLE</span>
+                    <strong>Procedural Lab (Seeded)</strong>
+                    <span className="pill pill-mint">ZERO-AI</span>
                   </div>
                   <p className="muted-note">
-                    Stack on teammates to reach the high relay, lock the neon energy bridge, and hold
-                    both vault plates together to open the exit.
+                    Deterministic seeded generator combining stacking, moving ferries, crates, keys,
+                    and vault plates. Same seed = same chamber for everyone.
                   </p>
-                  {isHost && (
+                  <div className="seed-row">
+                    <input
+                      type="text"
+                      className="seed-input"
+                      value={seedInput}
+                      maxLength={12}
+                      disabled={!isHost}
+                      onChange={(e) => setSeedInput(e.target.value)}
+                      aria-label="Procedural seed"
+                      placeholder="Seed (e.g. 428109)"
+                    />
                     <button
                       type="button"
-                      className="btn btn-primary btn-compact"
-                      onClick={() => {
-                        setActivePanel(null);
-                        onStartGame();
-                      }}
+                      className="btn btn-secondary btn-compact"
+                      disabled={!isHost}
+                      onClick={handleRandomSeed}
+                      title="Randomize seed"
                     >
-                      Launch Chamber 01
+                      <DiceIcon />
                     </button>
+                    {isHost && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-compact"
+                        onClick={handleLaunchProcedural}
+                      >
+                        Play Seed
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Challenge Modifiers */}
+                <div className="drawer-section">
+                  <h3 className="section-title">Challenge Modifier</h3>
+                  <div className="modifier-grid">
+                    {CHALLENGE_MODIFIERS.map((mod) => (
+                      <button
+                        key={mod.id}
+                        type="button"
+                        disabled={!isHost}
+                        className={`modifier-chip surface ${
+                          activeModifier === mod.id ? 'modifier-chip-active' : ''
+                        }`}
+                        onClick={() =>
+                          onSelectLevel({
+                            levelId: selectedLevel.id,
+                            proceduralSeed: selectedLevel.proceduralSeed,
+                            modifier: mod.id,
+                          })
+                        }
+                      >
+                        <strong>{mod.name}</strong>
+                        <span>{mod.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activePanel === 'leaderboard' && (
+              <div className="drawer-body">
+                {/* Verified Player Profile Card */}
+                <div className="surface profile-box">
+                  <div className="profile-head">
+                    <strong>{context.user.displayName}</strong>
+                    <span className="mini-tag">YOUR PROFILE</span>
+                  </div>
+                  {profile ? (
+                    <div className="profile-stats-grid">
+                      <div>
+                        <span className="muted-label">Clears</span>
+                        <strong>{profile.chambersCleared}</strong>
+                      </div>
+                      <div>
+                        <span className="muted-label">Gold</span>
+                        <strong className="medal-gold">{profile.medals.gold}</strong>
+                      </div>
+                      <div>
+                        <span className="muted-label">Switches</span>
+                        <strong>{profile.switchesTriggered}</strong>
+                      </div>
+                      <div>
+                        <span className="muted-label">Keys</span>
+                        <strong>{profile.keysCollected}</strong>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="muted-note">
+                      No recorded clears yet. Complete a chamber to start tracking your best times
+                      and medals!
+                    </p>
                   )}
                 </div>
 
-                <div className="chamber-card surface chamber-card-locked">
-                  <div className="chamber-card-head">
-                    <strong>Chamber 02 · Timing</strong>
-                    <span className="mini-tag">PHASE 4</span>
-                  </div>
-                  <p className="muted-note">
-                    Synchronized moving platforms and timed pressure bridges for 2–8 players.
-                  </p>
+                {/* Filter Pills */}
+                <div className="filter-pills">
+                  {[
+                    { id: 'all', label: 'All' },
+                    { id: 'chamber-01', label: '01' },
+                    { id: 'chamber-02', label: '02' },
+                    { id: 'chamber-03', label: '03' },
+                    { id: 'procedural', label: 'Labs' },
+                  ].map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      className={`filter-pill ${lbFilter === f.id ? 'filter-pill-active' : ''}`}
+                      onClick={() => setLbFilter(f.id)}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
                 </div>
 
-                <div className="chamber-card surface chamber-card-locked">
-                  <div className="chamber-card-head">
-                    <strong>Chamber 03 · Teamwork</strong>
-                    <span className="mini-tag">PHASE 4</span>
+                {loadingStats ? (
+                  <p className="muted-note">Loading leaderboard...</p>
+                ) : leaderboard.length === 0 ? (
+                  <div className="surface howto-item">
+                    <strong>No Records Yet</strong>
+                    <p className="muted-note">
+                      Clear any chamber with your squad (or in Solo Practice) to claim the #1 time!
+                    </p>
                   </div>
-                  <p className="muted-note">
-                    Heavy multi-player push crates, shared keys, and locked cooperative gates.
-                  </p>
-                </div>
+                ) : (
+                  <ul className="leaderboard-list">
+                    {leaderboard.map((entry, idx) => (
+                      <li key={entry.id} className="surface lb-row">
+                        <span className="lb-rank">#{idx + 1}</span>
+                        <div className="lb-main">
+                          <div className="lb-title-row">
+                            <strong>{entry.levelName}</strong>
+                            <span className={`pill pill-medal-${entry.medal}`}>
+                              {entry.medal.toUpperCase()}
+                            </span>
+                          </div>
+                          <span className="log-time">
+                            {entry.playerNames.join(', ')}
+                            {entry.soloPractice ? ' (Solo)' : ` (${entry.playerCount}P)`}
+                          </span>
+                        </div>
+                        <div className="lb-time">
+                          <code>{formatMs(entry.completionTimeMs)}</code>
+                          <span className="log-time">{entry.respawnCount} falls</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             )}
 
@@ -479,8 +789,32 @@ export function GameMenu({
 
                 <label className="setting-row surface">
                   <div>
+                    <strong>Colorblind Player Shapes</strong>
+                    <p className="muted-note">Draw distinct geometric emblems on P1–P8</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.colorblindShapes}
+                    onChange={(e) => onUpdateSettings({ colorblindShapes: e.target.checked })}
+                  />
+                </label>
+
+                <label className="setting-row surface">
+                  <div>
+                    <strong>High-Contrast Outlines</strong>
+                    <p className="muted-note">Crisp bright borders on characters, crates, and ledges</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.highContrast}
+                    onChange={(e) => onUpdateSettings({ highContrast: e.target.checked })}
+                  />
+                </label>
+
+                <label className="setting-row surface">
+                  <div>
                     <strong>Reduced Motion</strong>
-                    <p className="muted-note">Calms embers, bobs, and gameplay particles</p>
+                    <p className="muted-note">Calms ambient particles and menu animations</p>
                   </div>
                   <input
                     type="checkbox"
@@ -498,33 +832,33 @@ export function GameMenu({
             {activePanel === 'howto' && (
               <div className="drawer-body howto-list">
                 <div className="surface howto-item">
-                  <strong>Controls</strong>
+                  <strong>Controls (Keyboard, Gamepad &amp; Mobile Touch)</strong>
                   <p className="muted-note">
-                    Move with <code>A / D</code> or <code>← / →</code>. Jump with{' '}
-                    <code>W / ↑ / Space</code>. Restart anytime with <code>R</code>. On mobile, touch
-                    controls appear automatically.
+                    Move: <code>A/D</code> or <code>←/→</code> · Jump: <code>W/↑/Space</code> ·
+                    Quick Emotes: <code>1–4</code> · Restart: <code>R</code> · Options:{' '}
+                    <code>Esc</code> · Solo Partner Swap: <code>Tab</code>. Controllers work
+                    automatically!
                   </p>
                 </div>
                 <div className="surface howto-item">
-                  <strong>1. Stack Together</strong>
+                  <strong>Chamber 01 · Stacking &amp; Vault Plates</strong>
                   <p className="muted-note">
-                    Every character has a flat crown — jump onto a teammate&apos;s head to reach high
-                    ledges no single player can jump to alone.
+                    Jump onto teammates&apos; flat heads to climb high ledges, power &amp; lock the
+                    energy bridge, and stand on plates <code>A + B</code> together.
                   </p>
                 </div>
                 <div className="surface howto-item">
-                  <strong>2. Power &amp; Lock the Bridge</strong>
+                  <strong>Chamber 02 · Moving Platforms, Timed Bridge &amp; Keys</strong>
                   <p className="muted-note">
-                    Stand on the high violet <code>BRIDGE</code> plate to form the energy bridge. A
-                    teammate crosses and steps on <code>LOCK</code> to keep it active permanently.
+                    Ride ferries &amp; lifts to collect floating Security Keys, unlock laser gates,
+                    and sprint across the 5-second timed bridge together.
                   </p>
                 </div>
                 <div className="surface howto-item">
-                  <strong>3. Unlock the Vault Together</strong>
+                  <strong>Chamber 03 · Cooperative ×1 &amp; ×2 Push Crates</strong>
                   <p className="muted-note">
-                    Hold plates <code>A</code> and <code>B</code> simultaneously to unlock the exit
-                    gate, then enter together to clear the chamber. In Solo mode, press{' '}
-                    <code>Tab</code> to swap characters.
+                    Push light <code>×1</code> crates onto weight plates to power cargo lifts, and
+                    team up with 2 players to shove heavy <code>×2</code> crates into place!
                   </p>
                 </div>
               </div>

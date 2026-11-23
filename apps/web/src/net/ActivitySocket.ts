@@ -2,6 +2,8 @@ import {
   ACTIVITY_LIMITS,
   type ActivityRoomState,
   type C2SMessage,
+  type ChallengeModifier,
+  type EmotePingId,
   type GameWorldState,
   type RoomUpdateReason,
   type SimEvent,
@@ -18,6 +20,7 @@ export interface ActivitySocketCallbacks {
     reconnected?: boolean,
   ) => void;
   onGameSnapshot: (world: GameWorldState, events: SimEvent[]) => void;
+  onPlayerEmote: (playerId: string, emote: EmotePingId) => void;
   onPingUpdate: (rttMs: number) => void;
   onError: (code: string, message: string) => void;
 }
@@ -88,6 +91,9 @@ export class ActivitySocketClient {
         case 'game_snapshot':
           this.callbacks.onGameSnapshot(msg.world, msg.events);
           break;
+        case 'player_emote':
+          this.callbacks.onPlayerEmote(msg.playerId, msg.emote);
+          break;
         case 'pong': {
           const rtt = Math.max(0, Math.round(performance.now() - msg.clientTime));
           this.callbacks.onPingUpdate(rtt);
@@ -128,12 +134,38 @@ export class ActivitySocketClient {
     this.send({ type: 'set_ready', ready });
   }
 
-  startGame(): void {
-    this.send({ type: 'start_game' });
+  selectLevel(params: {
+    levelId: string;
+    proceduralSeed?: number | null;
+    modifier?: ChallengeModifier;
+  }): void {
+    this.send({
+      type: 'select_level',
+      levelId: params.levelId,
+      proceduralSeed: params.proceduralSeed ?? null,
+      modifier: params.modifier,
+    });
+  }
+
+  startGame(options?: {
+    levelId?: string;
+    proceduralSeed?: number | null;
+    modifier?: ChallengeModifier;
+  }): void {
+    this.send({
+      type: 'start_game',
+      levelId: options?.levelId,
+      proceduralSeed: options?.proceduralSeed ?? undefined,
+      modifier: options?.modifier,
+    });
   }
 
   sendInput(seq: number, buttons: number): void {
     this.send({ type: 'input', seq, buttons });
+  }
+
+  sendEmote(emote: EmotePingId): void {
+    this.send({ type: 'send_emote', emote });
   }
 
   swapSoloPuppet(): void {

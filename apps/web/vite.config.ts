@@ -35,5 +35,13 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+          discord: ['@discord/embedded-app-sdk'],
+        },
+      },
+    },
   },
 });

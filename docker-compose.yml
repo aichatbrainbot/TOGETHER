@@ -1,0 +1,42 @@
+services:
+  together:
+    build:
+      context: .
+      args:
+        VITE_DISCORD_CLIENT_ID: ${VITE_DISCORD_CLIENT_ID}
+    container_name: together-activity
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3001}:3001"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      SERVE_STATIC: "true"
+      ALLOW_DEV_AUTH: "false"
+      VITE_DISCORD_CLIENT_ID: ${VITE_DISCORD_CLIENT_ID}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET}
+      SESSION_SECRET: ${SESSION_SECRET}
+    volumes:
+      - together_data:/app/data
+
+  # Optional PostgreSQL 16 service for Phase 4+ cloud/self-hosted persistent storage.
+  # Start with: docker compose --profile postgres up -d
+  postgres:
+    image: postgres:16-alpine
+    container_name: together-postgres
+    profiles: ["postgres"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: together
+      POSTGRES_USER: together
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-together_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - together_pgdata:/var/lib/postgresql/data
+      - ./docs/postgres-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+volumes:
+  together_data:
+  together_pgdata:

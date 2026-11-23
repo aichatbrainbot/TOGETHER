@@ -139,6 +139,7 @@ describe('Discord Activity Multiplayer Server Integration', () => {
         discordClientSecret: 'TOP_SECRET_DO_NOT_LEAK',
         sessionSecret: 'integration-test-session-secret-0123456789',
         allowDevAuth: overrides?.allowDevAuth ?? false,
+        statsFilePath: null,
         disconnectGraceMs: overrides?.disconnectGraceMs ?? 250,
       },
       fetchFn: createMockDiscordFetch(),

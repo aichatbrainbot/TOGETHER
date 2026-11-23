@@ -18,6 +18,7 @@ import {
 import { createSessionToken, verifySessionToken } from './auth/sessionToken.js';
 import { type ServerConfig, loadServerConfig } from './config.js';
 import { ActivityRoomManager } from './rooms/ActivityRoomManager.js';
+import { JsonStatsStore, type StatsStore } from './storage/statsStore.js';
 
 const TokenRequestSchema = z.object({
   code: z.string().min(1).max(512),
@@ -32,6 +33,7 @@ export interface ActivityServerInstance {
   app: FastifyInstance;
   wss: WebSocketServer;
   roomManager: ActivityRoomManager;
+  statsStore: StatsStore;
   config: ServerConfig;
   start: () => Promise<{ address: string; port: number }>;
   close: () => Promise<void>;
@@ -50,12 +52,14 @@ function sendError(socket: WebSocket, code: ErrorCode, message: string): void {
 export async function createActivityServer(options: {
   config?: Partial<ServerConfig>;
   fetchFn?: FetchLike;
+  statsStore?: StatsStore;
   logger?: boolean;
 } = {}): Promise<ActivityServerInstance> {
   const config = loadServerConfig(options.config);
   const fetchFn = options.fetchFn ?? fetch;
   const startedAt = Date.now();
-  const roomManager = new ActivityRoomManager(config.disconnectGraceMs);
+  const statsStore = options.statsStore ?? new JsonStatsStore(config.statsFilePath);
+  const roomManager = new ActivityRoomManager(config.disconnectGraceMs, statsStore);
 
   const app = Fastify({
     logger: options.logger ?? false,
@@ -71,7 +75,7 @@ export async function createActivityServer(options: {
     return {
       ok: true,
       app: 'TOGETHER?',
-      phase: 2,
+      phase: 5,
       platform: 'discord-activity',
       discordConfigured: Boolean(config.discordClientId && config.discordClientSecret),
       devAuthEnabled: config.allowDevAuth,
@@ -83,6 +87,29 @@ export async function createActivityServer(options: {
 
   app.get('/api/health', handleHealth);
   app.get('/.proxy/api/health', handleHealth);
+
+  const handleLeaderboard = async (request: { query: unknown }) => {
+    const q = (request.query ?? {}) as { levelId?: string; limit?: string };
+    const levelId = typeof q.levelId === 'string' && q.levelId.trim() ? q.levelId.trim() : undefined;
+    const parsedLimit = Number(q.limit ?? 25);
+    const limit = Number.isFinite(parsedLimit) ? parsedLimit : 25;
+    return {
+      entries: statsStore.getLeaderboard(levelId, limit),
+    };
+  };
+
+  app.get('/api/leaderboard', handleLeaderboard);
+  app.get('/.proxy/api/leaderboard', handleLeaderboard);
+
+  const handleProfile = async (request: { params: unknown }) => {
+    const p = (request.params ?? {}) as { userId?: string };
+    const userId = typeof p.userId === 'string' ? p.userId.trim() : '';
+    const profile = userId ? statsStore.getPlayerProfile(userId) : null;
+    return { profile };
+  };
+
+  app.get('/api/profile/:userId', handleProfile);
+  app.get('/.proxy/api/profile/:userId', handleProfile);
 
   const handleDiscordToken = async (
     request: { body: unknown },
@@ -302,8 +329,23 @@ export async function createActivityServer(options: {
           }
           return;
         }
+        case 'select_level': {
+          const res = roomManager.selectLevel(socket, {
+            levelId: message.levelId,
+            proceduralSeed: message.proceduralSeed,
+            modifier: message.modifier,
+          });
+          if (!res.ok) {
+            sendError(socket, res.code, res.message);
+          }
+          return;
+        }
         case 'start_game': {
-          const res = roomManager.startGame(socket);
+          const res = roomManager.startGame(socket, {
+            levelId: message.levelId,
+            proceduralSeed: message.proceduralSeed,
+            modifier: message.modifier,
+          });
           if (!res.ok) {
             sendError(socket, res.code, res.message);
           }
@@ -315,6 +357,10 @@ export async function createActivityServer(options: {
         }
         case 'swap_solo_puppet': {
           roomManager.swapSoloPuppet(socket);
+          return;
+        }
+        case 'send_emote': {
+          roomManager.sendEmote(socket, message.emote);
           return;
         }
         case 'restart_level': {
@@ -347,6 +393,7 @@ export async function createActivityServer(options: {
     app,
     wss,
     roomManager,
+    statsStore,
     config,
     async start() {
       const address = await app.listen({ port: config.port, host: config.host });

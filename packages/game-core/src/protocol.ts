@@ -4,6 +4,10 @@ import { ACTIVITY_LIMITS } from './constants.js';
 export const RoomPhaseSchema = z.enum(['lobby', 'playing']);
 export type RoomPhase = z.infer<typeof RoomPhaseSchema>;
 
+export const ChallengeModifierSchema = z.enum(['standard', 'low_gravity', 'speed_run']);
+export const EmotePingIdSchema = z.enum(['stack', 'wait', 'go', 'nice']);
+export const MedalTierSchema = z.enum(['gold', 'silver', 'bronze']);
+
 export const RoomUpdateReasonSchema = z.enum([
   'join',
   'reconnect',
@@ -11,6 +15,7 @@ export const RoomUpdateReasonSchema = z.enum([
   'leave',
   'ready',
   'host_migrated',
+  'level_selected',
   'game_started',
   'game_restarted',
   'returned_lobby',
@@ -35,16 +40,31 @@ export const ActivityPlayerSchema = z.object({
 });
 export type ActivityPlayer = z.infer<typeof ActivityPlayerSchema>;
 
+export const SessionClearSummarySchema = z.object({
+  levelId: z.string(),
+  levelName: z.string(),
+  modifier: ChallengeModifierSchema,
+  completionTimeMs: z.number().int().nonnegative(),
+  respawnCount: z.number().int().nonnegative(),
+  medal: MedalTierSchema,
+  clearedAt: z.number().int().nonnegative(),
+});
+export type SessionClearSummary = z.infer<typeof SessionClearSummarySchema>;
+
 export const ActivityRoomStateSchema = z.object({
   instanceId: z.string().min(1).max(ACTIVITY_LIMITS.MAX_INSTANCE_ID_LENGTH),
   channelId: z.string().max(64).nullable(),
   guildId: z.string().max(64).nullable(),
   phase: RoomPhaseSchema,
   hostId: z.string().nullable(),
+  selectedLevelId: z.string().min(1).max(64),
+  selectedSeed: z.number().int().min(100_000).max(999_999).nullable(),
+  modifier: ChallengeModifierSchema,
   minPlayers: z.number().int().min(1),
   maxPlayers: z.number().int().min(2).max(ACTIVITY_LIMITS.MAX_PLAYERS),
   createdAt: z.number().int().nonnegative(),
   players: z.array(ActivityPlayerSchema),
+  sessionClears: z.array(SessionClearSummarySchema),
 });
 export type ActivityRoomState = z.infer<typeof ActivityRoomStateSchema>;
 
@@ -55,6 +75,8 @@ export const SimEventSchema = z.object({
     'switch_on',
     'bridge_on',
     'bridge_lock',
+    'key_pickup',
+    'gate_unlock',
     'door_unlock',
     'respawn',
     'level_complete',
@@ -80,6 +102,8 @@ export const SimPlayerStateSchema = z.object({
   facing: z.union([z.literal(1), z.literal(-1)]),
   grounded: z.boolean(),
   standingOnId: z.string().nullable(),
+  standingOnPlatformId: z.string().nullable(),
+  standingOnCrateId: z.string().nullable(),
   coyoteTicks: z.number().int(),
   jumpBufferTicks: z.number().int(),
   prevJumpDown: z.boolean(),
@@ -90,12 +114,15 @@ export const SimPlayerStateSchema = z.object({
 
 export const GameWorldStateSchema = z.object({
   levelId: z.string(),
+  proceduralSeed: z.number().int().nullable(),
+  modifier: ChallengeModifierSchema,
   tick: z.number().int().nonnegative(),
   elapsedMs: z.number().int().nonnegative(),
   soloPractice: z.boolean(),
   soloActiveId: z.string().nullable(),
   status: z.enum(['playing', 'completed']),
   completionTimeMs: z.number().int().nullable(),
+  medal: MedalTierSchema.nullable(),
   respawnCount: z.number().int().nonnegative(),
   players: z.array(SimPlayerStateSchema),
   switches: z.array(
@@ -103,6 +130,8 @@ export const GameWorldStateSchema = z.object({
       id: z.string(),
       pressed: z.boolean(),
       latched: z.boolean(),
+      remainingTicks: z.number().int().nonnegative(),
+      maxTicks: z.number().int().nonnegative(),
     }),
   ),
   bridges: z.array(
@@ -110,6 +139,51 @@ export const GameWorldStateSchema = z.object({
       id: z.string(),
       active: z.boolean(),
       locked: z.boolean(),
+      remainingTicks: z.number().int().nonnegative(),
+      maxTicks: z.number().int().nonnegative(),
+    }),
+  ),
+  movingPlatforms: z.array(
+    z.object({
+      id: z.string(),
+      x: z.number(),
+      y: z.number(),
+      dx: z.number(),
+      dy: z.number(),
+      w: z.number(),
+      h: z.number(),
+      progress: z.number(),
+      active: z.boolean(),
+    }),
+  ),
+  crates: z.array(
+    z.object({
+      id: z.string(),
+      x: z.number(),
+      y: z.number(),
+      vx: z.number(),
+      vy: z.number(),
+      w: z.number(),
+      h: z.number(),
+      requiredPushers: z.union([z.literal(1), z.literal(2)]),
+      activePushers: z.number().int().nonnegative(),
+      grounded: z.boolean(),
+      standingOnPlatformId: z.string().nullable(),
+    }),
+  ),
+  keys: z.array(
+    z.object({
+      id: z.string(),
+      x: z.number(),
+      y: z.number(),
+      carrierPlayerId: z.string().nullable(),
+      used: z.boolean(),
+    }),
+  ),
+  lockedGates: z.array(
+    z.object({
+      id: z.string(),
+      unlocked: z.boolean(),
     }),
   ),
   exitDoor: z.object({
@@ -120,6 +194,14 @@ export const GameWorldStateSchema = z.object({
     playersRequired: z.number().int().positive(),
     exitHoldTicks: z.number().int().nonnegative(),
   }),
+  contributions: z.record(
+    z.string(),
+    z.object({
+      switchesTriggered: z.number().int().nonnegative(),
+      keysCollected: z.number().int().nonnegative(),
+      respawns: z.number().int().nonnegative(),
+    }),
+  ),
 });
 
 export const C2SJoinInstanceSchema = z.object({
@@ -135,8 +217,18 @@ export const C2SSetReadySchema = z.object({
   ready: z.boolean(),
 });
 
+export const C2SSelectLevelSchema = z.object({
+  type: z.literal('select_level'),
+  levelId: z.string().min(1).max(64),
+  proceduralSeed: z.number().int().min(100_000).max(999_999).nullable().optional(),
+  modifier: ChallengeModifierSchema.optional(),
+});
+
 export const C2SStartGameSchema = z.object({
   type: z.literal('start_game'),
+  levelId: z.string().min(1).max(64).optional(),
+  proceduralSeed: z.number().int().min(100_000).max(999_999).nullable().optional(),
+  modifier: ChallengeModifierSchema.optional(),
 });
 
 export const C2SInputSchema = z.object({
@@ -147,6 +239,11 @@ export const C2SInputSchema = z.object({
 
 export const C2SSwapSoloPuppetSchema = z.object({
   type: z.literal('swap_solo_puppet'),
+});
+
+export const C2SSendEmoteSchema = z.object({
+  type: z.literal('send_emote'),
+  emote: EmotePingIdSchema,
 });
 
 export const C2SRestartLevelSchema = z.object({
@@ -165,9 +262,11 @@ export const C2SPingSchema = z.object({
 export const C2SMessageSchema = z.discriminatedUnion('type', [
   C2SJoinInstanceSchema,
   C2SSetReadySchema,
+  C2SSelectLevelSchema,
   C2SStartGameSchema,
   C2SInputSchema,
   C2SSwapSoloPuppetSchema,
+  C2SSendEmoteSchema,
   C2SRestartLevelSchema,
   C2SReturnLobbySchema,
   C2SPingSchema,
@@ -206,6 +305,13 @@ export const S2CGameSnapshotSchema = z.object({
   events: z.array(SimEventSchema),
 });
 
+export const S2CEmoteBroadcastSchema = z.object({
+  type: z.literal('player_emote'),
+  playerId: z.string().min(1),
+  emote: EmotePingIdSchema,
+  serverTime: z.number().int().nonnegative(),
+});
+
 export const S2CPongSchema = z.object({
   type: z.literal('pong'),
   clientTime: z.number().finite().nonnegative(),
@@ -222,6 +328,7 @@ export const S2CMessageSchema = z.discriminatedUnion('type', [
   S2CWelcomeSchema,
   S2CRoomStateSchema,
   S2CGameSnapshotSchema,
+  S2CEmoteBroadcastSchema,
   S2CPongSchema,
   S2CErrorSchema,
 ]);

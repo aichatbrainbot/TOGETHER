@@ -1,4 +1,11 @@
-import type { ActivityPlayer, ActivityRoomState, GameWorldState, SimEvent } from '@together/game-core';
+import type {
+  ActivityPlayer,
+  ActivityRoomState,
+  ChallengeModifier,
+  EmotePingId,
+  GameWorldState,
+  SimEvent,
+} from '@together/game-core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GameMenu } from './components/GameMenu.js';
 import { GameStage } from './components/GameStage.js';
@@ -8,6 +15,7 @@ import {
   type DiscordUserSummary,
   bootstrapDiscordActivity,
 } from './discord/activityClient.js';
+import type { ActiveEmote } from './game/GameRenderer.js';
 import { type GameSettings, loadGameSettings, saveGameSettings } from './game/settings.js';
 import { ActivitySocketClient, type ConnectionState } from './net/ActivitySocket.js';
 
@@ -36,6 +44,10 @@ export function App() {
   const [world, setWorld] = useState<GameWorldState | null>(null);
   const [latestEvents, setLatestEvents] = useState<SimEvent[]>([]);
   const [eventBatchId, setEventBatchId] = useState<number>(0);
+  const [emotesByPlayerId, setEmotesByPlayerId] = useState<Map<string, ActiveEmote>>(
+    () => new Map(),
+  );
+  const [emoteSeq, setEmoteSeq] = useState<number>(0);
   const [pingMs, setPingMs] = useState<number | null>(null);
   const [socketError, setSocketError] = useState<string | null>(null);
   const [eventLog, setEventLog] = useState<ActivityEventLogItem[]>([]);
@@ -127,8 +139,10 @@ export function App() {
                 pushLog('Host disconnected — host role migrated automatically');
               } else if (reason === 'leave') {
                 pushLog('A disconnected teammate left the session');
+              } else if (reason === 'level_selected') {
+                pushLog(`Selected ${nextRoom.selectedLevelId} (${nextRoom.modifier})`);
               } else if (reason === 'game_started') {
-                pushLog('Chamber 01 launched!');
+                pushLog(`Launched ${nextRoom.selectedLevelId}!`);
               } else if (reason === 'returned_lobby') {
                 pushLog('Returned to Main Menu');
               }
@@ -140,6 +154,15 @@ export function App() {
                 setLatestEvents(events);
                 setEventBatchId((n) => n + 1);
               }
+            },
+            onPlayerEmote: (playerId, emote) => {
+              if (!active) return;
+              setEmotesByPlayerId((prev) => {
+                const next = new Map(prev);
+                next.set(playerId, { emote, expiresAt: Date.now() + 2200 });
+                return next;
+              });
+              setEmoteSeq((n) => n + 1);
             },
             onPingUpdate: (rtt) => {
               if (active) setPingMs(rtt);
@@ -190,6 +213,10 @@ export function App() {
     socketRef.current?.sendInput(seq, buttons);
   }, []);
 
+  const handleSendEmote = useCallback((emote: EmotePingId) => {
+    socketRef.current?.sendEmote(emote);
+  }, []);
+
   const handleSwapSolo = useCallback(() => {
     socketRef.current?.swapSoloPuppet();
   }, []);
@@ -207,8 +234,22 @@ export function App() {
     socketRef.current.setReady(!selfPlayer.ready);
   }, [selfPlayer]);
 
-  const handleStartGame = useCallback(() => {
-    socketRef.current?.startGame();
+  const handleSelectLevel = useCallback(
+    (params: { levelId: string; proceduralSeed?: number | null; modifier?: ChallengeModifier }) => {
+      socketRef.current?.selectLevel(params);
+    },
+    [],
+  );
+
+  const handleStartGame = useCallback(
+    (options?: { levelId?: string; proceduralSeed?: number | null; modifier?: ChallengeModifier }) => {
+      socketRef.current?.startGame(options);
+    },
+    [],
+  );
+
+  const handleStartNextLevel = useCallback((nextLevelId: string, proceduralSeed?: number) => {
+    socketRef.current?.startGame({ levelId: nextLevelId, proceduralSeed });
   }, []);
 
   const handleReconnect = useCallback(() => {
@@ -226,7 +267,7 @@ export function App() {
         <div className="pip-count">
           <strong>{connectedPlayers.length}</strong>
           <span>
-            {room?.phase === 'playing' ? 'playing Chamber 01' : `/ ${room?.maxPlayers ?? 8} in menu`}
+            {room?.phase === 'playing' ? `playing ${room.selectedLevelId}` : `/ ${room?.maxPlayers ?? 8} in menu`}
           </span>
         </div>
         <div className="pip-avatars">
@@ -244,7 +285,7 @@ export function App() {
     );
   }
 
-  // Error screen with clear actionable troubleshooting
+  // Error screen
   if (bootError) {
     return (
       <main className="activity-shell centered-shell">
@@ -287,7 +328,7 @@ export function App() {
     );
   }
 
-  // Full-Screen Gameplay Stage (Chamber 01: Synchrony)
+  // Full-Screen Gameplay Stage (Chambers 01–03 & Procedural Labs)
   if (room?.phase === 'playing' && world) {
     return (
       <main className="game-viewport-root">
@@ -295,14 +336,18 @@ export function App() {
           world={world}
           events={latestEvents}
           eventBatchId={eventBatchId}
+          emotesByPlayerId={emotesByPlayerId}
+          emoteSeq={emoteSeq}
           localUserId={context.user.id}
           isHost={Boolean(selfPlayer?.isHost)}
           pingMs={pingMs}
           settings={settings}
           onUpdateSettings={handleUpdateSettings}
           onSendInput={handleSendInput}
+          onSendEmote={handleSendEmote}
           onSwapSolo={handleSwapSolo}
           onRestartLevel={handleRestartLevel}
+          onStartNextLevel={handleStartNextLevel}
           onReturnLobby={handleReturnLobby}
         />
       </main>
@@ -324,6 +369,7 @@ export function App() {
       eventLog={eventLog}
       settings={settings}
       onUpdateSettings={handleUpdateSettings}
+      onSelectLevel={handleSelectLevel}
       onStartGame={handleStartGame}
       onToggleReady={handleToggleReady}
       onReconnect={handleReconnect}

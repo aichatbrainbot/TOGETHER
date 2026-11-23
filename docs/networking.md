@@ -2,42 +2,40 @@
 
 ## Transport & Routing
 - **Inside Discord:**
-  - REST API: `POST /.proxy/api/token`, `GET /.proxy/api/health`
+  - REST API: `POST /.proxy/api/token`, `GET /.proxy/api/health`, `GET /.proxy/api/leaderboard`, `GET /.proxy/api/profile/:userId`
   - WebSocket: `wss://${window.location.host}/.proxy/ws`
-- **Local Browser Dev Harness (outside Discord):**
-  - REST API: `POST /api/dev-token` (only enabled when `ALLOW_DEV_AUTH=true` on server)
+- **Local Browser Preview (outside Discord, `ALLOW_DEV_AUTH=true` only):**
+  - REST API: `POST /api/dev-token`, `GET /api/leaderboard`, `GET /api/profile/:userId`
   - WebSocket: `ws://${window.location.host}/ws`
 
-## Session Identity (`discordSdk.instanceId`)
-- Discord assigns every Activity launch a shared `instanceId`.
-- All Discord users who launch or click **Join Activity** in the same Voice Channel, Text Channel, or DM receive the **exact same `instanceId`**.
-- `apps/server` maps each `instanceId` to a single authoritative `ActivityRoom` (2–8 players).
-- First verified user connecting to an `instanceId` becomes the room **Host**. If the Host disconnects or leaves, host authority automatically migrates to the next connected player.
-
-## Authentication Flow
-1. Client initializes `new DiscordSDK(VITE_DISCORD_CLIENT_ID)` and waits for `await discordSdk.ready()`.
-2. Client calls `discordSdk.commands.authorize({ client_id, response_type: 'code', state: '', prompt: 'none', scope: ['identify'] })`.
-3. Client sends `{ code }` to `POST /.proxy/api/token`.
-4. Server exchanges `code` with `https://discord.com/api/oauth2/token` using `DISCORD_CLIENT_SECRET`, queries `https://discord.com/api/users/@me`, and returns:
-   - `access_token` (passed to `discordSdk.commands.authenticate({ access_token })`)
-   - `user` (`{ id, username, globalName, avatarUrl }`)
-   - `sessionToken` (HMAC-SHA256 signed token verified on WebSocket join)
-5. Client subscribes to `Events.ACTIVITY_INSTANCE_PARTICIPANTS_UPDATE` and `Events.ACTIVITY_LAYOUT_MODE_UPDATE`, then opens the WebSocket and sends `join_instance` with `{ instanceId, channelId, guildId, sessionToken }`.
+## Session Identity & Authority
+- Rooms are keyed by Discord's shared `discordSdk.instanceId` (`2–8` players, plus honest **Solo Practice** when 1 player tests alone).
+- Server simulates active chambers at a fixed **60 Hz** (`DT = 1/60 s`) using `@together/game-core` and broadcasts authoritative `game_snapshot` frames at **30 Hz** (with immediate flushes for key events like `bridge_lock`, `key_pickup`, `gate_unlock`, `door_unlock`, `respawn`, `level_complete`).
+- Clients send **only validated input bitmasks** (`LEFT=1, RIGHT=2, JUMP=4`) tagged with monotonic `seq`—never positions or win claims.
 
 ## Wire Messages (`@together/game-core`, Zod-Validated)
 
 ### Client → Server (`C2SMessage`)
-- `join_instance`: `{ type, instanceId, channelId, guildId, sessionToken }` — Joins or reconnects to the shared Activity instance room.
-- `set_ready`: `{ type, ready }` — Toggles participant ready status in the Phase 1 Activity lobby.
-- `ping`: `{ type, clientTime }` — Latency / heartbeat check.
+- `join_instance`: `{ instanceId, channelId?, guildId?, sessionToken }`
+- `set_ready`: `{ ready }`
+- `select_level`: `{ levelId, proceduralSeed?, modifier? }` (Host only)
+- `start_game`: `{ levelId?, proceduralSeed?, modifier? }` (Host only)
+- `input`: `{ seq, buttons }` (bitmask `0..7`)
+- `swap_solo_puppet`: swaps active character in 1-player Solo Practice mode
+- `send_emote`: `{ emote: 'stack' | 'wait' | 'go' | 'nice' }` (rate-limited 500ms/player)
+- `restart_level`: resets active chamber for all participants
+- `return_lobby`: returns room to main menu (Host only)
+- `ping`: `{ clientTime }`
 
 ### Server → Client (`S2CMessage`)
-- `welcome`: `{ type, playerId, room }` — Confirms verified join/reconnect and delivers current room snapshot.
-- `room_state`: `{ type, room }` — Broadcast whenever any participant joins, toggles ready, disconnects, reconnects, leaves, or host migrates.
-- `pong`: `{ type, clientTime, serverTime }` — Heartbeat/RTT echo.
-- `error`: `{ type, code, message }` — Structured protocol or capacity error (e.g. `ROOM_FULL`, `UNAUTHORIZED`, `INVALID_MESSAGE`).
+- `welcome`: `{ playerId, reconnected, room, world? }`
+- `room_state`: `{ reason, room }` (includes `selectedLevelId`, `modifier`, `players`, `sessionClears`)
+- `game_snapshot`: `{ serverTime, world, events }`
+- `player_emote`: `{ playerId, emote, serverTime }`
+- `pong`: `{ clientTime, serverTime }`
+- `error`: `{ code, message }`
 
-## Disconnect & Reconnect Handling
-- When a player's WebSocket closes unexpectedly, their slot (color, slot index, username, avatar) is retained in a `disconnected` state for a **30-second grace period** (`DISCONNECT_GRACE_MS = 30_000`).
-- If the same verified Discord user reconnects to the same `instanceId` within 30 seconds, their exact slot and state restore seamlessly with `reconnected: true`.
-- After 30 seconds without reconnect, the slot is cleaned up and remaining participants receive an updated `room_state`. Empty rooms are garbage-collected cleanly.
+## Disconnects, Reconnects & Host Migration
+- Unexpected disconnects keep the player's slot in a translucent non-blocking ghost state for **30 seconds** (`DISCONNECT_GRACE_MS = 30_000`) and return any carried security key cleanly to its spawn pad so teammates are never soft-locked.
+- Host authority automatically migrates to the earliest-joined remaining connected player if the Host drops.
+- Reconnecting within 30 seconds restores the exact player slot, color, badge, and active body seamlessly.

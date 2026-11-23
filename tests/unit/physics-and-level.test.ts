@@ -1,9 +1,12 @@
 import {
   INPUT_BITS,
   LEVEL_CHAMBER_01,
+  LEVEL_CHAMBER_02,
+  LEVEL_CHAMBER_03,
   PHYSICS,
   SOLO_PUPPET_ID,
   createGameWorld,
+  generateProceduralChamber,
   stepGameWorld,
 } from '@together/game-core';
 import { describe, expect, it } from 'vitest';
@@ -187,5 +190,184 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     expect(world.soloPractice).toBe(true);
     expect(world.players).toHaveLength(2);
     expect(world.players.some((p) => p.id === SOLO_PUPPET_ID && p.isSoloPuppet)).toBe(true);
+  });
+});
+
+describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () => {
+  it('Chamber 02: carries riders on moving platforms, runs 5s timed bridge, and unlocks key gate', () => {
+    const world = createGameWorld(
+      [
+        { id: 'p1', displayName: 'Alice', slot: 0, connected: true },
+        { id: 'p2', displayName: 'Bob', slot: 1, connected: true },
+      ],
+      { level: LEVEL_CHAMBER_02 },
+    );
+
+    const p1 = world.players[0]!;
+    const p2 = world.players[1]!;
+    const ferry = world.movingPlatforms[0]!;
+
+    // Place P1 on moving ferry -> ferry should carry P1 smoothly across X!
+    p1.x = ferry.x + 12;
+    p1.y = ferry.y - PHYSICS.PLAYER_HEIGHT;
+    p1.grounded = true;
+    p1.standingOnPlatformId = ferry.id;
+    const startX = p1.x;
+
+    for (let t = 0; t < 40; t += 1) {
+      stepGameWorld(world, {}, LEVEL_CHAMBER_02);
+    }
+    expect(p1.x).toBeGreaterThan(startX + 15);
+    expect(p1.standingOnPlatformId).toBe(ferry.id);
+
+    // Step on 5s timed bridge switch -> bridge activates and stays active after leaving
+    p2.x = 462;
+    p2.y = 360 - PHYSICS.PLAYER_HEIGHT;
+    stepGameWorld(world, {}, LEVEL_CHAMBER_02);
+    expect(world.bridges[0]?.active).toBe(true);
+    expect(world.bridges[0]?.remainingTicks).toBe(300);
+
+    p2.x = 400; // step off
+    stepGameWorld(world, {}, LEVEL_CHAMBER_02);
+    expect(world.bridges[0]?.active).toBe(true);
+    expect(world.bridges[0]?.remainingTicks).toBe(299);
+
+    // Gate initially blocks P1
+    expect(world.lockedGates[0]?.unlocked).toBe(false);
+
+    // P1 picks up key_east -> key follows P1 -> touches gate_east -> gate unlocks permanently!
+    const keyDef = LEVEL_CHAMBER_02.keys[0]!;
+    p1.x = keyDef.x - 6;
+    p1.y = keyDef.y - 6;
+    const pickEvents = stepGameWorld(world, {}, LEVEL_CHAMBER_02);
+    expect(pickEvents.some((e) => e.type === 'key_pickup')).toBe(true);
+    expect(world.keys[0]?.carrierPlayerId).toBe('p1');
+
+    // Move carrier near gate_east (x=682, y=288..360)
+    p1.x = 668;
+    p1.y = 360 - PHYSICS.PLAYER_HEIGHT;
+    const unlockEvents = stepGameWorld(world, {}, LEVEL_CHAMBER_02);
+    expect(unlockEvents.some((e) => e.type === 'gate_unlock')).toBe(true);
+    expect(world.lockedGates[0]?.unlocked).toBe(true);
+    expect(world.keys[0]?.used).toBe(true);
+
+    // Both players reach Exit Door -> completes with GOLD medal!
+    p1.x = 730;
+    p1.y = 360 - PHYSICS.PLAYER_HEIGHT;
+    p2.x = 736;
+    p2.y = 360 - PHYSICS.PLAYER_HEIGHT;
+    for (let t = 0; t < 15; t += 1) {
+      stepGameWorld(world, {}, LEVEL_CHAMBER_02);
+    }
+    expect(world.status).toBe('completed');
+    expect(world.medal).toBe('gold');
+  });
+
+  it('Chamber 03: requires 1 pusher for light crate, 2 pushers for heavy x2 crate (1 in solo), and crate weight activates switches', () => {
+    const world = createGameWorld(
+      [
+        { id: 'p1', displayName: 'One', slot: 0, connected: true },
+        { id: 'p2', displayName: 'Two', slot: 1, connected: true },
+      ],
+      { level: LEVEL_CHAMBER_03 },
+    );
+
+    const p1 = world.players[0]!;
+    const p2 = world.players[1]!;
+    const lightCrate = world.crates[0]!;
+    const heavyCrate = world.crates[1]!;
+
+    // Cargo lift is initially inactive until lift_plate is weighed down
+    expect(world.movingPlatforms[0]?.active).toBe(false);
+
+    // 1 player pushing light crate (x1) moves it right
+    p1.x = lightCrate.x - PHYSICS.PLAYER_WIDTH;
+    p1.y = 384 - PHYSICS.PLAYER_HEIGHT;
+    const lightStartX = lightCrate.x;
+    for (let t = 0; t < 20; t += 1) {
+      stepGameWorld(world, { p1: { buttons: INPUT_BITS.RIGHT } }, LEVEL_CHAMBER_03);
+    }
+    expect(lightCrate.x).toBeGreaterThan(lightStartX + 10);
+
+    // Resting light crate on lift_plate (x=306..350) powers cargo lift!
+    lightCrate.x = 314;
+    lightCrate.y = 384 - lightCrate.h;
+    stepGameWorld(world, {}, LEVEL_CHAMBER_03);
+    expect(world.switches[0]?.pressed).toBe(true);
+    stepGameWorld(world, {}, LEVEL_CHAMBER_03);
+    expect(world.movingPlatforms[0]?.active).toBe(true);
+
+    // Heavy crate (x2): 1 player pushing alone in 2P co-op CANNOT move it
+    const heavyStartX = heavyCrate.x;
+    p1.x = heavyCrate.x - PHYSICS.PLAYER_WIDTH;
+    p1.y = 248 - PHYSICS.PLAYER_HEIGHT;
+    for (let t = 0; t < 15; t += 1) {
+      stepGameWorld(world, { p1: { buttons: INPUT_BITS.RIGHT } }, LEVEL_CHAMBER_03);
+    }
+    expect(heavyCrate.x).toBeCloseTo(heavyStartX, 1);
+    expect(heavyCrate.activePushers).toBe(1);
+
+    // 2 players pushing heavy crate together DOES move it smoothly!
+    p2.x = heavyCrate.x - PHYSICS.PLAYER_WIDTH - 4;
+    p2.y = 248 - PHYSICS.PLAYER_HEIGHT;
+    for (let t = 0; t < 20; t += 1) {
+      stepGameWorld(
+        world,
+        {
+          p1: { buttons: INPUT_BITS.RIGHT },
+          p2: { buttons: INPUT_BITS.RIGHT },
+        },
+        LEVEL_CHAMBER_03,
+      );
+    }
+    expect(heavyCrate.x).toBeGreaterThan(heavyStartX + 12);
+    expect(heavyCrate.activePushers).toBe(2);
+
+    // In Solo Practice, 1 player CAN push the heavy crate so solo never soft-locks
+    const soloWorld = createGameWorld(
+      [{ id: 'solo', displayName: 'Solo', slot: 0, connected: true }],
+      { level: LEVEL_CHAMBER_03, soloPractice: true },
+    );
+    const soloP = soloWorld.players[0]!;
+    const soloHeavy = soloWorld.crates[1]!;
+    const soloStart = soloHeavy.x;
+    soloP.x = soloHeavy.x - PHYSICS.PLAYER_WIDTH;
+    soloP.y = 248 - PHYSICS.PLAYER_HEIGHT;
+    for (let t = 0; t < 20; t += 1) {
+      stepGameWorld(soloWorld, { solo: { buttons: INPUT_BITS.RIGHT } }, LEVEL_CHAMBER_03);
+    }
+    expect(soloHeavy.x).toBeGreaterThan(soloStart + 10);
+  });
+
+  it('generates identical deterministic procedural chambers per seed and honors low_gravity modifier', () => {
+    const a = generateProceduralChamber(777123);
+    const b = generateProceduralChamber(777123);
+    const c = generateProceduralChamber(999456);
+
+    expect(a).toEqual(b);
+    expect(a.id).toBe('procedural:777123');
+    expect(c.id).toBe('procedural:999456');
+    expect(a.width).toBe(800);
+    expect(a.height).toBe(448);
+
+    const normalWorld = createGameWorld(
+      [{ id: 'p1', displayName: 'A', slot: 0, connected: true }],
+      { level: a, modifier: 'standard' },
+    );
+    const lowGWorld = createGameWorld(
+      [{ id: 'p1', displayName: 'A', slot: 0, connected: true }],
+      { level: a, modifier: 'low_gravity' },
+    );
+
+    let peakNormal = 999;
+    let peakLowG = 999;
+    for (let t = 0; t < 40; t += 1) {
+      stepGameWorld(normalWorld, { p1: { buttons: t < 20 ? INPUT_BITS.JUMP : 0 } }, a);
+      stepGameWorld(lowGWorld, { p1: { buttons: t < 20 ? INPUT_BITS.JUMP : 0 } }, a);
+      peakNormal = Math.min(peakNormal, normalWorld.players[0]!.y);
+      peakLowG = Math.min(peakLowG, lowGWorld.players[0]!.y);
+    }
+    // Low gravity jumps higher (smaller y)
+    expect(peakLowG).toBeLessThan(peakNormal - 12);
   });
 });

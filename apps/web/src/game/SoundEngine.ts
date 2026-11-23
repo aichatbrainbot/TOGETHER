@@ -1,5 +1,7 @@
 import type { SimEventType } from '@together/game-core';
 
+export type SoundCue = SimEventType | 'emote';
+
 /**
  * Procedural dark-neon Web Audio synthesizer with live volume & mute support.
  * Zero external audio dependencies and zero paid APIs.
@@ -36,7 +38,7 @@ export class SoundEngine {
     }
   }
 
-  play(event: SimEventType): void {
+  play(event: SoundCue): void {
     if (this.muted || this.masterVolume <= 0.001) return;
     this.unlock();
     if (!this.ctx || this.ctx.state !== 'running') return;
@@ -50,7 +52,7 @@ export class SoundEngine {
         this.tone(110, 68, 0.045, 'sine', 0.045, now);
         break;
       case 'switch_on':
-        this.tone(520, 680, 0.07, 'square', 0.05, now);
+        this.tone(520, 680, 0.07, 'square', 0.045, now);
         break;
       case 'bridge_on':
         this.tone(330, 494, 0.14, 'triangle', 0.06, now);
@@ -60,6 +62,15 @@ export class SoundEngine {
         this.tone(659.25, 659.25, 0.14, 'triangle', 0.065, now + 0.07);
         this.tone(783.99, 783.99, 0.2, 'triangle', 0.075, now + 0.14);
         break;
+      case 'key_pickup':
+        this.tone(659.25, 659.25, 0.08, 'triangle', 0.065, now);
+        this.tone(987.77, 987.77, 0.12, 'triangle', 0.07, now + 0.06);
+        this.tone(1318.5, 1318.5, 0.16, 'sine', 0.06, now + 0.12);
+        break;
+      case 'gate_unlock':
+        this.tone(329.63, 440, 0.1, 'square', 0.045, now);
+        this.tone(554.37, 659.25, 0.16, 'triangle', 0.065, now + 0.08);
+        break;
       case 'door_unlock':
         this.tone(440, 440, 0.09, 'triangle', 0.07, now);
         this.tone(554.37, 554.37, 0.1, 'triangle', 0.07, now + 0.07);
@@ -68,6 +79,9 @@ export class SoundEngine {
         break;
       case 'respawn':
         this.tone(360, 120, 0.18, 'sawtooth', 0.055, now);
+        break;
+      case 'emote':
+        this.tone(480, 720, 0.07, 'sine', 0.05, now);
         break;
       case 'level_complete': {
         const notes = [523.25, 659.25, 783.99, 1046.5];
