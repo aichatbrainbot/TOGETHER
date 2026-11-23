@@ -7,9 +7,11 @@ import {
 import {
   type BridgeRuntimeState,
   type CrateRuntimeState,
+  type CrumbleRuntimeState,
   type GameWorldState,
   INPUT_BITS,
   type KeyRuntimeState,
+  type LaserRuntimeState,
   type LevelDefinition,
   type LockedGateRuntimeState,
   type MovingPlatformRuntimeState,
@@ -64,6 +66,24 @@ function ensureContribution(world: GameWorldState, playerId: string): PlayerCont
     world.contributions[playerId] = c;
   }
   return c;
+}
+
+function getRespawnPoint(
+  level: LevelDefinition,
+  world: GameWorldState,
+  slot: number,
+): { x: number; y: number } {
+  if (world.activeCheckpointId && level.checkpoints) {
+    const cp = level.checkpoints.find((c) => c.id === world.activeCheckpointId);
+    if (cp) {
+      const clampedSlot = Math.max(0, Math.min(7, slot));
+      return {
+        x: Math.min(level.width - 48, cp.spawnX + (clampedSlot % 4) * 14),
+        y: cp.spawnFloorY - PHYSICS.PLAYER_HEIGHT,
+      };
+    }
+  }
+  return getSpawnPositionForSlot(level, slot);
 }
 
 export function createPlayerEntity(level: LevelDefinition, seed: SimPlayerSeed): SimPlayerState {
@@ -144,6 +164,17 @@ export function createGameWorld(
     };
   });
 
+  const crumblePlatforms: CrumbleRuntimeState[] = (level.crumblePlatforms ?? []).map((cp) => ({
+    id: cp.id,
+    state: 'solid',
+    timerTicks: 0,
+  }));
+
+  const lasers: LaserRuntimeState[] = (level.lasers ?? []).map((l) => ({
+    id: l.id,
+    active: true,
+  }));
+
   const crates: CrateRuntimeState[] = level.crates.map((cr) => ({
     id: cr.id,
     x: cr.x,
@@ -183,6 +214,7 @@ export function createGameWorld(
     completionTimeMs: null,
     medal: null,
     respawnCount: 0,
+    activeCheckpointId: null,
     players,
     switches: level.switches.map((sw) => ({
       id: sw.id,
@@ -199,6 +231,8 @@ export function createGameWorld(
       maxTicks: 0,
     })),
     movingPlatforms,
+    crumblePlatforms,
+    lasers,
     crates,
     keys,
     lockedGates,
@@ -221,6 +255,8 @@ export function cloneGameWorld(world: GameWorldState): GameWorldState {
     switches: world.switches.map((s) => ({ ...s })),
     bridges: world.bridges.map((b) => ({ ...b })),
     movingPlatforms: world.movingPlatforms.map((m) => ({ ...m })),
+    crumblePlatforms: world.crumblePlatforms.map((c) => ({ ...c })),
+    lasers: world.lasers.map((l) => ({ ...l })),
     crates: world.crates.map((c) => ({ ...c })),
     keys: world.keys.map((k) => ({ ...k })),
     lockedGates: world.lockedGates.map((g) => ({ ...g })),
@@ -237,6 +273,14 @@ function getStaticSolidRects(level: LevelDefinition, world: GameWorldState): Rec
     const def = level.bridges[i]!;
     const state = world.bridges[i];
     if (state?.active) {
+      solids.push(def);
+    }
+  }
+  const crumbleDefs = level.crumblePlatforms ?? [];
+  for (let i = 0; i < crumbleDefs.length; i += 1) {
+    const def = crumbleDefs[i]!;
+    const state = world.crumblePlatforms[i];
+    if (state && state.state !== 'gone') {
       solids.push(def);
     }
   }
@@ -270,8 +314,38 @@ function resolveBoxHorizontal(
 }
 
 /**
- * Advances the entire cooperative world by one deterministic tick (1/60 s).
- * Mutates `world` in place and returns discrete gameplay events for VFX/audio.
+ * Celeste-style upward corner correction: if a rising player clips the corner of a solid tile
+ * by <= CORNER_CORRECTION_PX, nudge horizontally around the edge instead of killing jump momentum.
+ */
+function tryUpwardCornerCorrection(
+  p: SimPlayerState,
+  solid: Rect,
+  allSolids: readonly Rect[],
+): boolean {
+  const maxNudge = PHYSICS.CORNER_CORRECTION_PX;
+  // Clipping the left edge of `solid` -> try nudging left
+  const clipLeft = p.x + PHYSICS.PLAYER_WIDTH - solid.x;
+  if (clipLeft > 0 && clipLeft <= maxNudge) {
+    const candidate = { x: solid.x - PHYSICS.PLAYER_WIDTH - 0.1, y: p.y, w: PHYSICS.PLAYER_WIDTH, h: PHYSICS.PLAYER_HEIGHT };
+    if (!allSolids.some((s) => rectsOverlap(candidate, s))) {
+      p.x = candidate.x;
+      return true;
+    }
+  }
+  // Clipping the right edge of `solid` -> try nudging right
+  const clipRight = solid.x + solid.w - p.x;
+  if (clipRight > 0 && clipRight <= maxNudge) {
+    const candidate = { x: solid.x + solid.w + 0.1, y: p.y, w: PHYSICS.PLAYER_WIDTH, h: PHYSICS.PLAYER_HEIGHT };
+    if (!allSolids.some((s) => rectsOverlap(candidate, s))) {
+      p.x = candidate.x;
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Advances the cooperative world by exactly one deterministic tick (1/60 s).
  */
 export function stepGameWorld(
   world: GameWorldState,
@@ -285,7 +359,7 @@ export function stepGameWorld(
   }
 
   const dt = PHYSICS.DT;
-  const gravity =
+  const baseGravity =
     world.modifier === 'low_gravity'
       ? PHYSICS.GRAVITY * PHYSICS.LOW_GRAVITY_FACTOR
       : PHYSICS.GRAVITY;
@@ -296,7 +370,6 @@ export function stepGameWorld(
   const activePlayers = world.players.filter((p) => p.connected);
   const switchById = new Map(world.switches.map((s) => [s.id, s]));
 
-  // Record previous tick standing relationships for smooth carry passes
   const prevStandingOn = new Map<string, string | null>();
   const prevStandingOnCrate = new Map<string, string | null>();
   const prevGrounded = new Map<string, boolean>();
@@ -306,7 +379,33 @@ export function stepGameWorld(
     prevGrounded.set(p.id, p.grounded);
   }
 
-  // 1. Advance Moving Platforms & carry riding players and crates first
+  // 1. Advance Crumbling Platforms timers
+  const crumbleDefs = level.crumblePlatforms ?? [];
+  for (let i = 0; i < crumbleDefs.length; i += 1) {
+    const def = crumbleDefs[i]!;
+    const state = world.crumblePlatforms[i]!;
+    if (state.state === 'shaking') {
+      state.timerTicks -= 1;
+      if (state.timerTicks <= 0) {
+        state.state = 'gone';
+        state.timerTicks = def.respawnTicks ?? 144;
+        events.push({
+          type: 'crumble',
+          x: def.x + def.w / 2,
+          y: def.y + def.h / 2,
+          color: '#FFB84D',
+        });
+      }
+    } else if (state.state === 'gone') {
+      state.timerTicks -= 1;
+      if (state.timerTicks <= 0) {
+        state.state = 'solid';
+        state.timerTicks = 0;
+      }
+    }
+  }
+
+  // 2. Advance Moving Platforms & carry riding players and crates first
   for (let i = 0; i < level.movingPlatforms.length; i += 1) {
     const def = level.movingPlatforms[i]!;
     const plat = world.movingPlatforms[i]!;
@@ -352,7 +451,7 @@ export function stepGameWorld(
     ...world.movingPlatforms.map((mp) => ({ x: mp.x, y: mp.y, w: mp.w, h: mp.h })),
   ];
 
-  // 2. Apply validated player inputs, coyote time, jump buffer, and gravity
+  // 3. Apply validated player inputs with Celeste Apex Hang + Fall Gravity Multiplier
   const intendedDirByPlayer = new Map<string, number>();
   for (const p of activePlayers) {
     if (p.invulnTicks > 0) p.invulnTicks -= 1;
@@ -418,10 +517,18 @@ export function stepGameWorld(
       p.vy *= PHYSICS.JUMP_CUT_MULTIPLIER;
     }
 
-    p.vy = Math.min(PHYSICS.MAX_FALL_SPEED, p.vy + gravity * dt);
+    // Celeste-style asymmetric gravity: apex hang when holding jump near peak, snappy fall downward
+    let effectiveGravity = baseGravity;
+    if (!p.grounded && jumpDown && Math.abs(p.vy) < PHYSICS.APEX_VELOCITY_THRESHOLD) {
+      effectiveGravity = baseGravity * PHYSICS.APEX_GRAVITY_MULTIPLIER;
+    } else if (p.vy > 0) {
+      effectiveGravity = baseGravity * PHYSICS.FALL_GRAVITY_MULTIPLIER;
+    }
+
+    p.vy = Math.min(PHYSICS.MAX_FALL_SPEED, p.vy + effectiveGravity * dt);
   }
 
-  // 3. Evaluate Cooperative Pushable Crates (x1 and x2 pushers)
+  // 4. Cooperative Pushable Crates (x1 and x2 pushers)
   const crateDeltaX = new Map<string, number>();
   for (let i = 0; i < world.crates.length; i += 1) {
     const crate = world.crates[i]!;
@@ -438,7 +545,6 @@ export function stepGameWorld(
         Math.min(p.y + PHYSICS.PLAYER_HEIGHT, crate.y + crate.h) - Math.max(p.y, crate.y);
       if (verticalOverlap < 6) continue;
 
-      // Pushing right against crate's left side (allow slight chain distance when 2 players push together)
       if (dir > 0 && p.x + PHYSICS.PLAYER_WIDTH >= crate.x - 24 && p.x < crate.x + crate.w / 2) {
         pushRight += 1;
       } else if (
@@ -461,9 +567,8 @@ export function stepGameWorld(
       crate.vx = moveToward(crate.vx, 0, PHYSICS.CRATE_FRICTION * dt);
     }
 
-    crate.vy = Math.min(PHYSICS.MAX_FALL_SPEED, crate.vy + gravity * dt);
+    crate.vy = Math.min(PHYSICS.MAX_FALL_SPEED, crate.vy + baseGravity * dt);
 
-    // Crate horizontal move
     crate.x += crate.vx * dt;
     const cBoxX = crateRect(crate);
     const otherCrates = world.crates
@@ -475,7 +580,6 @@ export function stepGameWorld(
     }
     crateDeltaX.set(crate.id, crate.x - startCrateX);
 
-    // Crate vertical move
     const prevBottom = crate.y + crate.h;
     crate.grounded = false;
     crate.standingOnPlatformId = null;
@@ -507,7 +611,7 @@ export function stepGameWorld(
       }
     }
 
-    // Crate hazard respawn safety (never soft-lock!)
+    // Crate hazard respawn safety
     const fellOut = crate.y > level.height + 24;
     const hitHazard = level.hazards.some((h) => rectsOverlap(crateRect(crate), h));
     if (fellOut || hitHazard) {
@@ -521,7 +625,7 @@ export function stepGameWorld(
     }
   }
 
-  // 4. Horizontal movement for players (bottom-to-top for head-carry & crate-top carry)
+  // 5. Horizontal movement for players (bottom-to-top carry)
   const bottomToTop = [...activePlayers].sort(
     (a, b) => b.y - a.y || a.slot - b.slot || a.id.localeCompare(b.id),
   );
@@ -545,7 +649,7 @@ export function stepGameWorld(
     deltaXById.set(p.id, p.x - startX);
   }
 
-  // 5. Gentle player-vs-player horizontal separation (only when genuinely overlapping vertically > 4 px)
+  // 6. Gentle player-vs-player horizontal separation
   for (let pass = 0; pass < 2; pass += 1) {
     for (let i = 0; i < bottomToTop.length; i += 1) {
       for (let j = i + 1; j < bottomToTop.length; j += 1) {
@@ -575,8 +679,11 @@ export function stepGameWorld(
     }
   }
 
-  // 6. Vertical movement + solids + moving platforms + crates + bottom-to-top head stacking
+  // 7. Vertical movement + corner correction + one-way + moving platforms + crates + head stacking
   const settled: SimPlayerState[] = [];
+  const oneWays = level.oneWayPlatforms ?? [];
+  const bouncePads = level.bouncePads ?? [];
+
   for (const p of bottomToTop) {
     const prevTop = p.y;
     const prevBottom = p.y + PHYSICS.PLAYER_HEIGHT;
@@ -589,7 +696,7 @@ export function stepGameWorld(
 
     const box = playerRect(p);
 
-    // 6a. Static level geometry, active bridges, and closed gates
+    // 7a. Static solids, active bridges, crumbling platforms, locked gates
     for (const solid of staticSolids) {
       if (!rectsOverlap(box, solid)) continue;
       if (p.vy >= 0 && prevBottom <= solid.y + 8) {
@@ -597,8 +704,11 @@ export function stepGameWorld(
         p.vy = 0;
         p.grounded = true;
       } else if (p.vy < 0 && prevTop >= solid.y + solid.h - 8) {
-        p.y = solid.y + solid.h;
-        p.vy = 0;
+        // Celeste corner correction before cancelling upward jump!
+        if (!tryUpwardCornerCorrection(p, solid, staticSolids)) {
+          p.y = solid.y + solid.h;
+          p.vy = 0;
+        }
       } else {
         const pushUp = box.y + box.h - solid.y;
         const pushDown = solid.y + solid.h - box.y;
@@ -611,10 +721,23 @@ export function stepGameWorld(
           if (p.vy < 0) p.vy = 0;
         }
       }
+      box.x = p.x;
       box.y = p.y;
     }
 
-    // 6b. Moving platforms
+    // 7b. One-way platforms (jump up through freely, land solidly from above!)
+    if (p.vy >= 0) {
+      for (const ow of oneWays) {
+        if (rectsOverlap(box, ow) && prevBottom <= ow.y + 8) {
+          p.y = ow.y - PHYSICS.PLAYER_HEIGHT;
+          p.vy = 0;
+          p.grounded = true;
+          box.y = p.y;
+        }
+      }
+    }
+
+    // 7c. Moving platforms
     for (const mp of world.movingPlatforms) {
       const mRect: Rect = { x: mp.x, y: mp.y, w: mp.w, h: mp.h };
       if (!rectsOverlap(box, mRect)) continue;
@@ -630,7 +753,7 @@ export function stepGameWorld(
       box.y = p.y;
     }
 
-    // 6c. Pushable crates (standable tops!)
+    // 7d. Pushable crates (standable tops)
     for (const cr of world.crates) {
       const cRect = crateRect(cr);
       if (!rectsOverlap(box, cRect)) continue;
@@ -646,7 +769,7 @@ export function stepGameWorld(
       box.y = p.y;
     }
 
-    // 6d. Player-on-player head stacking
+    // 7e. Player-on-player head stacking
     for (const other of settled) {
       const horizOverlap =
         p.x + PHYSICS.PLAYER_WIDTH > other.x + 2 && p.x < other.x + PHYSICS.PLAYER_WIDTH - 2;
@@ -667,6 +790,39 @@ export function stepGameWorld(
       }
     }
 
+    // 7f. Trigger shaking on any crumbling platform currently stood upon
+    if (p.grounded) {
+      const footBox: Rect = { x: p.x + 2, y: p.y + PHYSICS.PLAYER_HEIGHT, w: PHYSICS.PLAYER_WIDTH - 4, h: 3 };
+      for (let ci = 0; ci < crumbleDefs.length; ci += 1) {
+        const cDef = crumbleDefs[ci]!;
+        const cState = world.crumblePlatforms[ci]!;
+        if (cState.state === 'solid' && rectsOverlap(footBox, cDef)) {
+          cState.state = 'shaking';
+          cState.timerTicks = cDef.delayTicks ?? 50;
+        }
+      }
+    }
+
+    // 7g. Bounce / Spring Pads
+    for (const pad of bouncePads) {
+      const padTrigger: Rect = { x: pad.x - 1, y: pad.y - 3, w: pad.w + 2, h: pad.h + 4 };
+      if (rectsOverlap(playerRect(p), padTrigger) && p.vy >= -80) {
+        p.vy = pad.velocityY ?? PHYSICS.BOUNCE_VELOCITY;
+        p.grounded = false;
+        p.standingOnId = null;
+        p.standingOnPlatformId = null;
+        p.standingOnCrateId = null;
+        p.coyoteTicks = 0;
+        events.push({
+          type: 'bounce',
+          x: pad.x + pad.w / 2,
+          y: pad.y,
+          color: pad.accent === 'amber' ? '#FFB84D' : '#54D6C5',
+          playerId: p.id,
+        });
+      }
+    }
+
     if (p.grounded && !prevGrounded.get(p.id)) {
       events.push({
         type: 'land',
@@ -680,13 +836,49 @@ export function stepGameWorld(
     settled.push(p);
   }
 
-  // 7. Hazards & Respawn (including safe Key drop back to spawn!)
+  // 8. Checkpoints
+  for (const cp of level.checkpoints ?? []) {
+    if (world.activeCheckpointId === cp.id) continue;
+    if (activePlayers.some((p) => rectsOverlap(playerRect(p), cp))) {
+      world.activeCheckpointId = cp.id;
+      events.push({
+        type: 'checkpoint',
+        x: cp.x + cp.w / 2,
+        y: cp.y + cp.h / 2,
+        color: '#4FF0D6',
+      });
+    }
+  }
+
+  // 9. Update Switch-Controlled Laser Beams
+  const laserDefs = level.lasers ?? [];
+  for (let i = 0; i < laserDefs.length; i += 1) {
+    const def = laserDefs[i]!;
+    const state = world.lasers[i]!;
+    const sw1 = switchById.get(def.disabledBySwitchId);
+    const sw2 = def.alsoDisabledBySwitchId ? switchById.get(def.alsoDisabledBySwitchId) : undefined;
+    const disabled = Boolean(
+      sw1?.pressed ||
+        sw1?.latched ||
+        (sw1 && sw1.remainingTicks > 0) ||
+        sw2?.pressed ||
+        sw2?.latched ||
+        (sw2 && sw2.remainingTicks > 0),
+    );
+    state.active = !disabled;
+  }
+
+  // 10. Hazards, Active Lasers & Void Respawn
   for (const p of activePlayers) {
     const box = playerRect(p);
     const fellOut = p.y > level.height + 24;
     const hitHazard = level.hazards.some((h) => rectsOverlap(box, h));
-    if (fellOut || hitHazard) {
-      const spawn = getSpawnPositionForSlot(level, p.slot);
+    const hitLaser =
+      p.invulnTicks === 0 &&
+      laserDefs.some((ld, idx) => world.lasers[idx]?.active && rectsOverlap(box, ld));
+
+    if (fellOut || hitHazard || hitLaser) {
+      const spawn = getRespawnPoint(level, world, p.slot);
       events.push({
         type: 'respawn',
         x: p.x + PHYSICS.PLAYER_WIDTH / 2,
@@ -706,7 +898,7 @@ export function stepGameWorld(
       world.respawnCount += 1;
       ensureContribution(world, p.id).respawns += 1;
 
-      // Return any key carried by this player back to its spawn pad cleanly
+      // Return any carried key cleanly back to spawn
       for (let kIdx = 0; kIdx < world.keys.length; kIdx += 1) {
         const k = world.keys[kIdx]!;
         if (k.carrierPlayerId === p.id && !k.used) {
@@ -719,14 +911,13 @@ export function stepGameWorld(
     }
   }
 
-  // 8. Keys & Locked Gates
+  // 11. Keys & Locked Gates
   const playerById = new Map(activePlayers.map((p) => [p.id, p]));
   for (let i = 0; i < level.keys.length; i += 1) {
     const def = level.keys[i]!;
     const key = world.keys[i]!;
     if (key.used) continue;
 
-    // Reset key if its carrier disconnected
     if (key.carrierPlayerId && !playerById.has(key.carrierPlayerId)) {
       key.carrierPlayerId = null;
       key.x = def.x;
@@ -743,7 +934,7 @@ export function stepGameWorld(
           type: 'key_pickup',
           x: key.x,
           y: key.y,
-          color: def.accent === 'mint' ? '#54D6C5' : '#8B72FF',
+          color: '#FFD166',
           playerId: picker.id,
         });
       }
@@ -757,7 +948,6 @@ export function stepGameWorld(
         key.x += (targetX - key.x) * 0.28;
         key.y += (targetY - key.y) * 0.28;
 
-        // Check proximity to linked Locked Gate
         const gateIdx = level.lockedGates.findIndex((g) => g.id === def.unlocksGateId);
         if (gateIdx >= 0) {
           const gateDef = level.lockedGates[gateIdx]!;
@@ -777,7 +967,7 @@ export function stepGameWorld(
                 type: 'gate_unlock',
                 x: gateDef.x + gateDef.w / 2,
                 y: gateDef.y + gateDef.h / 2,
-                color: gateDef.accent === 'mint' ? '#54D6C5' : '#8B72FF',
+                color: '#4FF0D6',
                 playerId: carrier.id,
               });
             }
@@ -787,7 +977,7 @@ export function stepGameWorld(
     }
   }
 
-  // 9. Switches (Hold, Latch, Timed, Vault — activated by players AND crates where allowed)
+  // 12. Switches (Hold, Latch, Timed, Vault)
   for (let i = 0; i < level.switches.length; i += 1) {
     const def = level.switches[i]!;
     const state = world.switches[i]!;
@@ -831,32 +1021,47 @@ export function stepGameWorld(
         type: def.kind === 'latch' && !wasLatched ? 'bridge_lock' : 'switch_on',
         x: def.x + def.w / 2,
         y: def.y,
-        color: def.accent === 'mint' ? '#54D6C5' : '#8B72FF',
+        color: def.accent === 'mint' ? '#4FF0D6' : def.accent === 'amber' ? '#FFB84D' : '#A28BFF',
         playerId: triggeringPlayer?.id,
       });
     }
   }
 
-  // Also check switch-controlled locked gates if any exist
+  // Re-evaluate lasers immediately on the same tick a switch is pressed!
+  const freshSwitchById = new Map(world.switches.map((s) => [s.id, s]));
+  for (let i = 0; i < laserDefs.length; i += 1) {
+    const def = laserDefs[i]!;
+    const state = world.lasers[i]!;
+    const sw1 = freshSwitchById.get(def.disabledBySwitchId);
+    const sw2 = def.alsoDisabledBySwitchId ? freshSwitchById.get(def.alsoDisabledBySwitchId) : undefined;
+    state.active = !Boolean(
+      sw1?.pressed ||
+        sw1?.latched ||
+        (sw1 && sw1.remainingTicks > 0) ||
+        sw2?.pressed ||
+        sw2?.latched ||
+        (sw2 && sw2.remainingTicks > 0),
+    );
+  }
+
   for (let i = 0; i < level.lockedGates.length; i += 1) {
     const def = level.lockedGates[i]!;
     const gate = world.lockedGates[i]!;
     if (def.unlockedBySwitchId && !gate.unlocked) {
-      const sw = world.switches.find((s) => s.id === def.unlockedBySwitchId);
+      const sw = freshSwitchById.get(def.unlockedBySwitchId);
       if (sw?.pressed || sw?.latched) {
         gate.unlocked = true;
         events.push({
           type: 'gate_unlock',
           x: def.x + def.w / 2,
           y: def.y + def.h / 2,
-          color: def.accent === 'mint' ? '#54D6C5' : '#8B72FF',
+          color: '#4FF0D6',
         });
       }
     }
   }
 
-  // 10. Bridges (hold, latched, or timed)
-  const freshSwitchById = new Map(world.switches.map((s) => [s.id, s]));
+  // 13. Bridges (Hold, Latched, Timed)
   for (let i = 0; i < level.bridges.length; i += 1) {
     const def = level.bridges[i]!;
     const state: BridgeRuntimeState = world.bridges[i]!;
@@ -878,12 +1083,12 @@ export function stepGameWorld(
         type: 'bridge_on',
         x: def.x + def.w / 2,
         y: def.y,
-        color: state.locked ? '#54D6C5' : '#8B72FF',
+        color: state.locked ? '#4FF0D6' : '#A28BFF',
       });
     }
   }
 
-  // 11. Simultaneous Dual Vault Switches -> Exit Door unlock
+  // 14. Simultaneous Dual Vault Switches -> Exit Door unlock
   if (level.requiresVaultSwitches && !world.exitDoor.unlocked) {
     const vaultSwitches = level.switches
       .filter((sw) => sw.kind === 'vault')
@@ -902,7 +1107,7 @@ export function stepGameWorld(
             type: 'door_unlock',
             x: level.exitDoor.x + level.exitDoor.w / 2,
             y: level.exitDoor.y + level.exitDoor.h / 2,
-            color: '#54D6C5',
+            color: '#4FF0D6',
           });
         }
       } else if (world.exitDoor.chargeTicks > 0) {
@@ -911,7 +1116,7 @@ export function stepGameWorld(
     }
   }
 
-  // 12. Exit Door win condition (all active connected players inside unlocked exit)
+  // 15. Exit Door Win Condition
   let insideCount = 0;
   for (const p of world.players) {
     if (!p.connected) {
@@ -939,7 +1144,7 @@ export function stepGameWorld(
         type: 'level_complete',
         x: level.exitDoor.x + level.exitDoor.w / 2,
         y: level.exitDoor.y + level.exitDoor.h / 2,
-        color: '#54D6C5',
+        color: '#4FF0D6',
       });
     }
   } else {

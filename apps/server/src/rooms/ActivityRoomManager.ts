@@ -88,6 +88,9 @@ export type ActionResult =
   | { ok: false; code: 'NOT_IN_ROOM' | 'NOT_HOST'; message: string };
 
 const IMMEDIATE_EVENT_TYPES = new Set<SimEvent['type']>([
+  'bounce',
+  'crumble',
+  'checkpoint',
   'bridge_lock',
   'key_pickup',
   'gate_unlock',

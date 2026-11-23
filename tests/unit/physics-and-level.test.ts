@@ -1,18 +1,28 @@
 import {
+  CAMPAIGN_LEVELS,
   INPUT_BITS,
   LEVEL_CHAMBER_01,
   LEVEL_CHAMBER_02,
   LEVEL_CHAMBER_03,
+  LEVEL_CHAMBER_04,
+  LEVEL_SPECIAL_S1,
+  LEVEL_SPECIAL_S2,
+  LEVEL_SPECIAL_S3,
+  LEVEL_SPECIAL_S4,
+  NORMAL_LEVELS,
   PHYSICS,
   SOLO_PUPPET_ID,
+  SPECIAL_LEVELS,
   createGameWorld,
   generateProceduralChamber,
+  getNextLevelId,
+  getSpawnPositionForSlot,
   stepGameWorld,
 } from '@together/game-core';
 import { describe, expect, it } from 'vitest';
 
-describe('Chamber 01 deterministic physics & cooperative rules', () => {
-  it('prevents a single player from reaching High Ledge alone, requiring player stacking', () => {
+describe('Celeste-grade kinematic physics & Stage 1 cooperative rules', () => {
+  it('enforces exact jump kinematics (single jump ~76-80px, faster fall than rise, cannot reach 88px ledge alone)', () => {
     const world = createGameWorld([
       { id: 'p1', displayName: 'Alice', slot: 0, connected: true },
       { id: 'p2', displayName: 'Bob', slot: 1, connected: true },
@@ -24,15 +34,51 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     p1.grounded = true;
 
     let highestFeetY = p1.y + PHYSICS.PLAYER_HEIGHT;
-    for (let t = 0; t < 45; t += 1) {
+    let apexTick = 0;
+    let landTick = 0;
+
+    for (let t = 1; t <= 60; t += 1) {
       stepGameWorld(world, {
-        p1: { buttons: t < 20 ? INPUT_BITS.JUMP : 0 },
+        p1: { buttons: t <= 24 ? INPUT_BITS.JUMP : 0 },
       });
-      highestFeetY = Math.min(highestFeetY, p1.y + PHYSICS.PLAYER_HEIGHT);
+      const feetY = p1.y + PHYSICS.PLAYER_HEIGHT;
+      if (feetY < highestFeetY) {
+        highestFeetY = feetY;
+        apexTick = t;
+      }
+      if (t > 5 && p1.grounded && landTick === 0) {
+        landTick = t;
+        break;
+      }
     }
 
-    // High Ledge top is at y=296; single jump peak must stay below (greater y than) 296
+    const jumpHeight = LEVEL_CHAMBER_01.spawnFloorY - highestFeetY;
+    // Exact Celeste-tuned jump height: >= 74 px and < 84 px (strictly below 88 px High Ledge!)
+    expect(jumpHeight).toBeGreaterThanOrEqual(74);
+    expect(jumpHeight).toBeLessThan(84);
     expect(highestFeetY).toBeGreaterThan(296);
+
+    // Asymmetric gravity: descent takes fewer ticks than ascent (snappy landing)
+    const fallTicks = landTick - apexTick;
+    expect(fallTicks).toBeLessThan(apexTick);
+  });
+
+  it('nudges players up to 5px past ceiling corners during upward jump (Celeste corner correction)', () => {
+    const world = createGameWorld([
+      { id: 'p1', displayName: 'Runner', slot: 0, connected: true },
+    ]);
+    const p1 = world.players[0]!;
+    // High Ledge in Chamber 01 starts at x=208, y=296..310.
+    // Position player right edge 3px overlapping left corner of ledge (x = 208 - 20 + 3 = 191)
+    p1.x = 191;
+    p1.y = 314;
+    p1.vy = -300;
+    p1.grounded = false;
+
+    stepGameWorld(world, {});
+    // Corner correction should nudge player left clear of x=208 and preserve upward vy!
+    expect(p1.x + PHYSICS.PLAYER_WIDTH).toBeLessThanOrEqual(208);
+    expect(p1.vy).toBeLessThan(-200);
   });
 
   it('supports stable head-stacking, horizontal head-carry, and jumping onto High Ledge', () => {
@@ -44,13 +90,11 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     const p1 = world.players[0]!;
     const p2 = world.players[1]!;
 
-    // Place P1 on floor near High Ledge and drop P2 right onto P1's head
     p1.x = 180;
     p1.y = LEVEL_CHAMBER_01.spawnFloorY - PHYSICS.PLAYER_HEIGHT;
     p2.x = 180;
     p2.y = p1.y - PHYSICS.PLAYER_HEIGHT - 2;
 
-    // Settle for 15 ticks
     for (let t = 0; t < 15; t += 1) {
       stepGameWorld(world, {});
     }
@@ -60,7 +104,6 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     expect(p2.standingOnId).toBe('p1');
     expect(Math.round(p2.y + PHYSICS.PLAYER_HEIGHT)).toBe(Math.round(p1.y));
 
-    // Walk P1 right for 15 ticks -> P2 should be carried along on top of P1's head!
     const p2StartX = p2.x;
     for (let t = 0; t < 15; t += 1) {
       stepGameWorld(world, { p1: { buttons: INPUT_BITS.RIGHT } });
@@ -68,7 +111,7 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     expect(p2.x).toBeGreaterThan(p2StartX + 10);
     expect(p2.standingOnId).toBe('p1');
 
-    // Now position stack cleanly beside High Ledge (x=208, y=296) and jump P2 onto it!
+    // Position stack cleanly beside High Ledge (x=208, y=296) and jump P2 onto it
     p1.x = 176;
     p1.vx = 0;
     p2.x = 176;
@@ -100,23 +143,19 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     const p1 = world.players[0]!;
     const p2 = world.players[1]!;
 
-    // Initially bridge is inactive
     stepGameWorld(world, {});
     expect(world.bridges[0]?.active).toBe(false);
 
-    // P2 stands on bridge_hold (x=242..278, y=288)
     p2.x = 250;
     p2.y = 296 - PHYSICS.PLAYER_HEIGHT;
     stepGameWorld(world, {});
     expect(world.bridges[0]?.active).toBe(true);
     expect(world.bridges[0]?.locked).toBe(false);
 
-    // P2 steps off -> bridge deactivates again
     p2.x = 210;
     stepGameWorld(world, {});
     expect(world.bridges[0]?.active).toBe(false);
 
-    // P1 falls into hazard pit (x=400, y=424) -> respawns safely at spawn & increments counter
     p1.x = 400;
     p1.y = 424;
     const respawnEvents = stepGameWorld(world, {});
@@ -124,7 +163,6 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     expect(world.respawnCount).toBe(1);
     expect(p1.y).toBe(LEVEL_CHAMBER_01.spawnFloorY - PHYSICS.PLAYER_HEIGHT);
 
-    // P1 touches bridge_lock (x=528..564, y=376) -> bridge permanently locks ON even after leaving
     p1.x = 536;
     p1.y = 384 - PHYSICS.PLAYER_HEIGHT;
     stepGameWorld(world, {});
@@ -145,13 +183,11 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     const p1 = world.players[0]!;
     const p2 = world.players[1]!;
 
-    // Only P1 on vault_left -> door stays locked
     p1.x = 598;
     p1.y = 384 - PHYSICS.PLAYER_HEIGHT;
     for (let t = 0; t < 25; t += 1) stepGameWorld(world, {});
     expect(world.exitDoor.unlocked).toBe(false);
 
-    // P1 on vault_left AND P2 on vault_right simultaneously -> door unlocks after 15 ticks
     p2.x = 662;
     p2.y = 384 - PHYSICS.PLAYER_HEIGHT;
     let unlockedEvent = false;
@@ -162,14 +198,12 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
     expect(unlockedEvent).toBe(true);
     expect(world.exitDoor.unlocked).toBe(true);
 
-    // Only P1 enters exit -> NOT completed yet (1/2)
     p1.x = 732;
     p1.y = 384 - PHYSICS.PLAYER_HEIGHT;
     for (let t = 0; t < 15; t += 1) stepGameWorld(world, {});
     expect(world.status).toBe('playing');
     expect(world.exitDoor.playersInside).toBe(1);
 
-    // Both P1 and P2 inside exit -> completes level!
     p2.x = 740;
     p2.y = 384 - PHYSICS.PLAYER_HEIGHT;
     let completeEvent = false;
@@ -193,8 +227,8 @@ describe('Chamber 01 deterministic physics & cooperative rules', () => {
   });
 });
 
-describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () => {
-  it('Chamber 02: carries riders on moving platforms, runs 5s timed bridge, and unlocks key gate', () => {
+describe('Stages 2 & 3 (Fixed bypasses, Timing, Crates) and Procedural Labs', () => {
+  it('Stage 2: prevents jumping across Pit 2 (168px), carries ferry riders, runs 5s timed bridge, unlocks key gate', () => {
     const world = createGameWorld(
       [
         { id: 'p1', displayName: 'Alice', slot: 0, connected: true },
@@ -205,11 +239,31 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
 
     const p1 = world.players[0]!;
     const p2 = world.players[1]!;
-    const ferry = world.movingPlatforms[0]!;
 
-    // Place P1 on moving ferry -> ferry should carry P1 smoothly across X!
+    // Verify Pit 2 (x=484..652, 168px) CANNOT be cleared by a running jump without timed bridge!
+    p1.x = 462;
+    p1.y = 360 - PHYSICS.PLAYER_HEIGHT;
+    p1.vx = PHYSICS.MOVE_SPEED;
+    p1.grounded = true;
+    let bypassedPit2 = false;
+    for (let t = 0; t < 55; t += 1) {
+      stepGameWorld(
+        world,
+        { p1: { buttons: INPUT_BITS.RIGHT | (t < 24 ? INPUT_BITS.JUMP : 0) } },
+        LEVEL_CHAMBER_02,
+      );
+      if (p1.grounded && p1.x >= 652 && Math.round(p1.y + PHYSICS.PLAYER_HEIGHT) === 360) {
+        bypassedPit2 = true;
+      }
+    }
+    expect(bypassedPit2).toBe(false);
+
+    // Ferry carry verification
+    const ferry = world.movingPlatforms[0]!;
     p1.x = ferry.x + 12;
     p1.y = ferry.y - PHYSICS.PLAYER_HEIGHT;
+    p1.vx = 0;
+    p1.vy = 0;
     p1.grounded = true;
     p1.standingOnPlatformId = ferry.id;
     const startX = p1.x;
@@ -220,22 +274,21 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
     expect(p1.x).toBeGreaterThan(startX + 15);
     expect(p1.standingOnPlatformId).toBe(ferry.id);
 
-    // Step on 5s timed bridge switch -> bridge activates and stays active after leaving
-    p2.x = 462;
+    // 5s timed bridge switch at x=432..476
+    p2.x = 442;
     p2.y = 360 - PHYSICS.PLAYER_HEIGHT;
     stepGameWorld(world, {}, LEVEL_CHAMBER_02);
     expect(world.bridges[0]?.active).toBe(true);
     expect(world.bridges[0]?.remainingTicks).toBe(300);
 
-    p2.x = 400; // step off
+    p2.x = 400;
     stepGameWorld(world, {}, LEVEL_CHAMBER_02);
     expect(world.bridges[0]?.active).toBe(true);
     expect(world.bridges[0]?.remainingTicks).toBe(299);
 
-    // Gate initially blocks P1
     expect(world.lockedGates[0]?.unlocked).toBe(false);
 
-    // P1 picks up key_east -> key follows P1 -> touches gate_east -> gate unlocks permanently!
+    // Key pickup + gate unlock
     const keyDef = LEVEL_CHAMBER_02.keys[0]!;
     p1.x = keyDef.x - 6;
     p1.y = keyDef.y - 6;
@@ -243,7 +296,6 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
     expect(pickEvents.some((e) => e.type === 'key_pickup')).toBe(true);
     expect(world.keys[0]?.carrierPlayerId).toBe('p1');
 
-    // Move carrier near gate_east (x=682, y=288..360)
     p1.x = 668;
     p1.y = 360 - PHYSICS.PLAYER_HEIGHT;
     const unlockEvents = stepGameWorld(world, {}, LEVEL_CHAMBER_02);
@@ -251,7 +303,6 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
     expect(world.lockedGates[0]?.unlocked).toBe(true);
     expect(world.keys[0]?.used).toBe(true);
 
-    // Both players reach Exit Door -> completes with GOLD medal!
     p1.x = 730;
     p1.y = 360 - PHYSICS.PLAYER_HEIGHT;
     p2.x = 736;
@@ -263,7 +314,7 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
     expect(world.medal).toBe('gold');
   });
 
-  it('Chamber 03: requires 1 pusher for light crate, 2 pushers for heavy x2 crate (1 in solo), and crate weight activates switches', () => {
+  it('Stage 3: prevents key bypass without heavy crate, requires x1/x2 pushers (1 in solo), and crate weighs lift plate', () => {
     const world = createGameWorld(
       [
         { id: 'p1', displayName: 'One', slot: 0, connected: true },
@@ -277,6 +328,15 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
     const lightCrate = world.crates[0]!;
     const heavyCrate = world.crates[1]!;
 
+    // Verify key_vault (x=490, y=138) CANNOT be grabbed by jumping directly off mezzanine (y=248) without crate!
+    p1.x = 480;
+    p1.y = 248 - PHYSICS.PLAYER_HEIGHT;
+    p1.grounded = true;
+    for (let t = 0; t < 35; t += 1) {
+      stepGameWorld(world, { p1: { buttons: t < 22 ? INPUT_BITS.JUMP : 0 } }, LEVEL_CHAMBER_03);
+    }
+    expect(world.keys[0]?.carrierPlayerId).toBeNull();
+
     // Cargo lift is initially inactive until lift_plate is weighed down
     expect(world.movingPlatforms[0]?.active).toBe(false);
 
@@ -289,8 +349,8 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
     }
     expect(lightCrate.x).toBeGreaterThan(lightStartX + 10);
 
-    // Resting light crate on lift_plate (x=306..350) powers cargo lift!
-    lightCrate.x = 314;
+    // Resting light crate on lift_plate (x=342..386) powers cargo lift
+    lightCrate.x = 350;
     lightCrate.y = 384 - lightCrate.h;
     stepGameWorld(world, {}, LEVEL_CHAMBER_03);
     expect(world.switches[0]?.pressed).toBe(true);
@@ -307,7 +367,7 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
     expect(heavyCrate.x).toBeCloseTo(heavyStartX, 1);
     expect(heavyCrate.activePushers).toBe(1);
 
-    // 2 players pushing heavy crate together DOES move it smoothly!
+    // 2 players pushing heavy crate together DOES move it smoothly
     p2.x = heavyCrate.x - PHYSICS.PLAYER_WIDTH - 4;
     p2.y = 248 - PHYSICS.PLAYER_HEIGHT;
     for (let t = 0; t < 20; t += 1) {
@@ -323,7 +383,7 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
     expect(heavyCrate.x).toBeGreaterThan(heavyStartX + 12);
     expect(heavyCrate.activePushers).toBe(2);
 
-    // In Solo Practice, 1 player CAN push the heavy crate so solo never soft-locks
+    // Solo Practice allows 1 player to push heavy crate so solo never soft-locks
     const soloWorld = createGameWorld(
       [{ id: 'solo', displayName: 'Solo', slot: 0, connected: true }],
       { level: LEVEL_CHAMBER_03, soloPractice: true },
@@ -367,7 +427,205 @@ describe('Chamber 02 (Timing), Chamber 03 (Teamwork), and Procedural Labs', () =
       peakNormal = Math.min(peakNormal, normalWorld.players[0]!.y);
       peakLowG = Math.min(peakLowG, lowGWorld.players[0]!.y);
     }
-    // Low gravity jumps higher (smaller y)
     expect(peakLowG).toBeLessThan(peakNormal - 12);
+  });
+});
+
+describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invariants', () => {
+  it('registers 4 Normal stages (1-4) and 4 Special stages (S1-S4) in exact progression order', () => {
+    expect(NORMAL_LEVELS.map((l) => l.code)).toEqual(['1', '2', '3', '4']);
+    expect(SPECIAL_LEVELS.map((l) => l.code)).toEqual(['S1', 'S2', 'S3', 'S4']);
+    expect(CAMPAIGN_LEVELS).toHaveLength(8);
+    expect(getNextLevelId(LEVEL_CHAMBER_04.id)).toBe(LEVEL_SPECIAL_S1.id);
+    expect(getNextLevelId(LEVEL_SPECIAL_S1.id)).toBe(LEVEL_SPECIAL_S2.id);
+    expect(getNextLevelId(LEVEL_SPECIAL_S2.id)).toBe(LEVEL_SPECIAL_S3.id);
+    expect(getNextLevelId(LEVEL_SPECIAL_S3.id)).toBe(LEVEL_SPECIAL_S4.id);
+    expect(getNextLevelId(LEVEL_SPECIAL_S4.id)).toBeNull();
+  });
+
+  it('Stage 4: verifies Bounce Pad launch (>=132px), Laser hazard + switch disable, Crumbling lifecycle, and Checkpoint respawn', () => {
+    const world = createGameWorld(
+      [
+        { id: 'p1', displayName: 'Alpha', slot: 0, connected: true },
+        { id: 'p2', displayName: 'Beta', slot: 1, connected: true },
+      ],
+      { level: LEVEL_CHAMBER_04 },
+    );
+    const p1 = world.players[0]!;
+    const p2 = world.players[1]!;
+
+    // 1. Bounce Pad (pad_west at x=176, y=374) launches player >= 132px up to reach control balcony (y=252)
+    p1.x = 180;
+    p1.y = 384 - PHYSICS.PLAYER_HEIGHT;
+    let bounced = false;
+    let minFeetY = 384;
+    for (let t = 0; t < 45; t += 1) {
+      const evs = stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+      if (evs.some((e) => e.type === 'bounce')) bounced = true;
+      minFeetY = Math.min(minFeetY, p1.y + PHYSICS.PLAYER_HEIGHT);
+    }
+    expect(bounced).toBe(true);
+    expect(384 - minFeetY).toBeGreaterThanOrEqual(134);
+
+    // 2. Active Laser Beam (laser_mid at x=224, y=304..384) respawns player when touched
+    p2.x = 220;
+    p2.y = 384 - PHYSICS.PLAYER_HEIGHT;
+    const hitLaserEvs = stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+    expect(hitLaserEvs.some((e) => e.type === 'respawn')).toBe(true);
+    expect(world.respawnCount).toBe(1);
+
+    // Standing on laser_hold (x=92, y=244) disables laser_mid so P2 passes safely!
+    p1.x = 100;
+    p1.y = 252 - PHYSICS.PLAYER_HEIGHT;
+    p1.vx = 0;
+    p1.vy = 0;
+    stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+    expect(world.lasers[0]?.active).toBe(false);
+
+    p2.x = 220;
+    p2.y = 384 - PHYSICS.PLAYER_HEIGHT;
+    p2.invulnTicks = 0;
+    const passLaserEvs = stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+    expect(passLaserEvs.some((e) => e.type === 'respawn')).toBe(false);
+
+    // 3. Crumbling platform lifecycle: solid -> shaking -> gone -> solid
+    const cDef = LEVEL_CHAMBER_04.crumblePlatforms![0]!;
+    p2.x = cDef.x + 10;
+    p2.y = cDef.y - PHYSICS.PLAYER_HEIGHT - 1;
+    p2.vy = 20;
+    for (let t = 0; t < 4; t += 1) {
+      stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+    }
+    expect(world.crumblePlatforms[0]?.state).toBe('shaking');
+
+    // Step off to east side of hub (clear of checkpoint at 478..496) so crumble timer finishes
+    p2.x = 524;
+    p2.y = 368 - PHYSICS.PLAYER_HEIGHT;
+    let crumbledEvent = false;
+    for (let t = 0; t < cDef.delayTicks + 4; t += 1) {
+      const evs = stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+      if (evs.some((e) => e.type === 'crumble')) crumbledEvent = true;
+    }
+    expect(crumbledEvent).toBe(true);
+    expect(world.crumblePlatforms[0]?.state).toBe('gone');
+
+    for (let t = 0; t < cDef.respawnTicks + 4; t += 1) {
+      stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+    }
+    expect(world.crumblePlatforms[0]?.state).toBe('solid');
+
+    // 4. Checkpoint (cp_stage4 at x=478, y=332) updates respawn location!
+    p2.x = 478;
+    p2.y = 368 - PHYSICS.PLAYER_HEIGHT;
+    const cpEvs = stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+    expect(cpEvs.some((e) => e.type === 'checkpoint')).toBe(true);
+    expect(world.activeCheckpointId).toBe('cp_stage4');
+
+    // Triggering hazard now respawns at checkpoint hub (x >= 470, y = 368 - PLAYER_HEIGHT) instead of west spawn!
+    p2.x = 300;
+    p2.y = 424;
+    p2.invulnTicks = 0;
+    stepGameWorld(world, {}, LEVEL_CHAMBER_04);
+    expect(p2.x).toBeGreaterThanOrEqual(470);
+    expect(p2.y).toBe(368 - PHYSICS.PLAYER_HEIGHT);
+  });
+
+  it('Special Stage S1: allows jumping UP through one-way platforms and landing solidly on top', () => {
+    const world = createGameWorld(
+      [{ id: 'p1', displayName: 'Sky', slot: 0, connected: true }],
+      { level: LEVEL_SPECIAL_S1 },
+    );
+    const p1 = world.players[0]!;
+    const ow = LEVEL_SPECIAL_S1.oneWayPlatforms![0]!;
+
+    // Start directly beneath one-way platform (y=336) on floor (y=396) and jump upward through it
+    p1.x = ow.x + 20;
+    p1.y = 396 - PHYSICS.PLAYER_HEIGHT;
+    p1.grounded = true;
+
+    let passedAbove = false;
+    let landedOnOneWay = false;
+    for (let t = 0; t < 48; t += 1) {
+      stepGameWorld(world, { p1: { buttons: t < 20 ? INPUT_BITS.JUMP : 0 } }, LEVEL_SPECIAL_S1);
+      if (p1.y + PHYSICS.PLAYER_HEIGHT < ow.y) passedAbove = true;
+      if (passedAbove && p1.grounded && Math.round(p1.y + PHYSICS.PLAYER_HEIGHT) === ow.y) {
+        landedOnOneWay = true;
+        break;
+      }
+    }
+    expect(passedAbove).toBe(true);
+    expect(landedOnOneWay).toBe(true);
+  });
+
+  it('geometric playability invariant: all 8 campaign stages have clean 8P spawns, clear bounce-pad skies, and unobstructed vertical lifts', () => {
+    const overlaps = (
+      a: { x: number; y: number; w: number; h: number },
+      b: { x: number; y: number; w: number; h: number },
+    ) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+    for (const lvl of CAMPAIGN_LEVELS) {
+      // 1. All 8 player slots spawn cleanly on solid ground with no solid/hazard/laser/pad collision
+      for (let slot = 0; slot < 8; slot += 1) {
+        const pos = getSpawnPositionForSlot(lvl, slot);
+        const box = { x: pos.x, y: pos.y, w: PHYSICS.PLAYER_WIDTH, h: PHYSICS.PLAYER_HEIGHT };
+        const footSupport = lvl.solids.some(
+          (s) =>
+            Math.abs(s.y - lvl.spawnFloorY) <= 1 &&
+            pos.x + 2 >= s.x &&
+            pos.x + PHYSICS.PLAYER_WIDTH - 2 <= s.x + s.w,
+        );
+        expect(footSupport, `${lvl.id} slot ${slot} missing floor support`).toBe(true);
+
+        for (const s of lvl.solids) {
+          expect(overlaps(box, s), `${lvl.id} slot ${slot} overlaps solid`).toBe(false);
+        }
+        for (const h of lvl.hazards) {
+          expect(overlaps(box, h), `${lvl.id} slot ${slot} overlaps hazard`).toBe(false);
+        }
+        for (const pad of lvl.bouncePads ?? []) {
+          expect(overlaps(box, pad), `${lvl.id} slot ${slot} overlaps bouncePad ${pad.id}`).toBe(
+            false,
+          );
+        }
+        for (const laser of lvl.lasers ?? []) {
+          expect(overlaps(box, laser), `${lvl.id} slot ${slot} overlaps laser ${laser.id}`).toBe(
+            false,
+          );
+        }
+      }
+
+      // 2. Every bounce pad has >= 140px clear sky directly above it (no solid head-bonk ceiling!)
+      for (const pad of lvl.bouncePads ?? []) {
+        const shaft = { x: pad.x + 2, y: Math.max(24, pad.y - 140), w: pad.w - 4, h: 136 };
+        for (const s of lvl.solids) {
+          // Ignore top border ceiling (y=0, h=24)
+          if (s.y === 0) continue;
+          expect(
+            overlaps(shaft, s),
+            `${lvl.id} bounce pad ${pad.id} obstructed by solid (${s.x},${s.y})`,
+          ).toBe(false);
+        }
+      }
+
+      // 3. Every vertical moving platform has clear headroom across its entire travel path
+      for (const mp of lvl.movingPlatforms) {
+        if (mp.startY === mp.endY) continue;
+        const minY = Math.min(mp.startY, mp.endY);
+        const maxY = Math.max(mp.startY, mp.endY);
+        const travelShaft = {
+          x: mp.startX + 4,
+          y: Math.max(24, minY - PHYSICS.PLAYER_HEIGHT - 4),
+          w: mp.w - 8,
+          h: maxY - minY + PHYSICS.PLAYER_HEIGHT,
+        };
+        for (const s of lvl.solids) {
+          if (s.y === 0) continue;
+          expect(
+            overlaps(travelShaft, s),
+            `${lvl.id} vertical lift ${mp.id} obstructed by solid (${s.x},${s.y})`,
+          ).toBe(false);
+        }
+      }
+    }
   });
 });

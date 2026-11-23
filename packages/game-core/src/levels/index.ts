@@ -2,17 +2,44 @@ import { PHYSICS, type LevelDefinition, type MedalTier } from '../types.js';
 import { LEVEL_CHAMBER_01 } from './chamber01.js';
 import { LEVEL_CHAMBER_02 } from './chamber02.js';
 import { LEVEL_CHAMBER_03 } from './chamber03.js';
+import { LEVEL_CHAMBER_04 } from './chamber04.js';
 import { generateProceduralChamber, normalizeProceduralSeed } from './procedural.js';
+import {
+  LEVEL_SPECIAL_S1,
+  LEVEL_SPECIAL_S2,
+  LEVEL_SPECIAL_S3,
+  LEVEL_SPECIAL_S4,
+} from './specialStages.js';
 
 export { LEVEL_CHAMBER_01 } from './chamber01.js';
 export { LEVEL_CHAMBER_02 } from './chamber02.js';
 export { LEVEL_CHAMBER_03 } from './chamber03.js';
+export { LEVEL_CHAMBER_04 } from './chamber04.js';
+export {
+  LEVEL_SPECIAL_S1,
+  LEVEL_SPECIAL_S2,
+  LEVEL_SPECIAL_S3,
+  LEVEL_SPECIAL_S4,
+} from './specialStages.js';
 export { generateProceduralChamber, mulberry32, normalizeProceduralSeed } from './procedural.js';
 
-export const CAMPAIGN_LEVELS: readonly LevelDefinition[] = [
+export const NORMAL_LEVELS: readonly LevelDefinition[] = [
   LEVEL_CHAMBER_01,
   LEVEL_CHAMBER_02,
   LEVEL_CHAMBER_03,
+  LEVEL_CHAMBER_04,
+];
+
+export const SPECIAL_LEVELS: readonly LevelDefinition[] = [
+  LEVEL_SPECIAL_S1,
+  LEVEL_SPECIAL_S2,
+  LEVEL_SPECIAL_S3,
+  LEVEL_SPECIAL_S4,
+];
+
+export const CAMPAIGN_LEVELS: readonly LevelDefinition[] = [
+  ...NORMAL_LEVELS,
+  ...SPECIAL_LEVELS,
 ];
 
 export function resolveLevel(levelId: string, proceduralSeed?: number | null): LevelDefinition {
@@ -37,8 +64,7 @@ export function getSpawnPositionForSlot(
   level: LevelDefinition,
   slot: number,
 ): { x: number; y: number } {
-  // Fit up to 8 players side-by-side cleanly on any spawn floor
-  const spacing = 19;
+  const spacing = 18;
   const clampedSlot = Math.max(0, Math.min(7, slot));
   return {
     x: level.spawnOriginX + clampedSlot * spacing,

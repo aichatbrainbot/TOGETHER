@@ -1,11 +1,13 @@
 import {
   type ActivityPlayer,
   type ActivityRoomState,
-  CAMPAIGN_LEVELS,
   CHALLENGE_MODIFIERS,
   type ChallengeModifier,
   type LeaderboardEntry,
+  type LevelDefinition,
+  NORMAL_LEVELS,
   type PlayerProfileStats,
+  SPECIAL_LEVELS,
   normalizeProceduralSeed,
   resolveLevel,
 } from '@together/game-core';
@@ -166,12 +168,75 @@ export function GameMenu({
     }
   };
 
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      void document.documentElement.requestFullscreen?.().catch(() => {});
-    } else {
-      void document.exitFullscreen?.().catch(() => {});
-    }
+  const renderDifficultyStars = (difficulty: number) =>
+    `${'★'.repeat(Math.max(1, Math.min(5, difficulty)))}${'☆'.repeat(
+      Math.max(0, 5 - Math.max(1, Math.min(5, difficulty))),
+    )}`;
+
+  const renderStageCard = (lvl: LevelDefinition) => {
+    const isSelected = selectedLevel.id === lvl.id;
+    const isSpecial = lvl.tier === 'special';
+    return (
+      <div
+        key={lvl.id}
+        className={`chamber-card surface ${isSelected ? 'chamber-card-live' : ''} ${
+          isSpecial ? 'chamber-card-special' : ''
+        }`}
+        style={{ borderLeft: `3px solid ${lvl.themeAccent}` }}
+      >
+        <div className="chamber-card-head">
+          <div className="chamber-title-group">
+            <span
+              className={`stage-code-pill ${isSpecial ? 'stage-code-special' : ''}`}
+              style={{
+                borderColor: lvl.themeAccent,
+                color: lvl.themeAccent,
+              }}
+            >
+              {lvl.code}
+            </span>
+            <strong>{lvl.title}</strong>
+          </div>
+          <span
+            className="difficulty-stars"
+            style={{ color: lvl.themeAccent }}
+            title={`Difficulty ${lvl.difficulty}/5`}
+          >
+            {renderDifficultyStars(lvl.difficulty)}
+          </span>
+        </div>
+        <p className="muted-note">{lvl.subtitle}</p>
+        <div className="chamber-card-foot">
+          <div className="chamber-meta-tags">
+            <span className="pill pill-accent">{lvl.mechanicTag}</span>
+            <span className="log-time">Par {formatMs(lvl.parTimeMs.gold)}</span>
+          </div>
+          {isHost && (
+            <div className="chamber-card-btns">
+              {!isSelected && (
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-compact"
+                  onClick={() => onSelectLevel({ levelId: lvl.id })}
+                >
+                  Select
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-primary btn-compact"
+                onClick={() => {
+                  setActivePanel(null);
+                  onStartGame({ levelId: lvl.id });
+                }}
+              >
+                Play
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
   };
 
   const handleRandomSeed = () => {
@@ -283,8 +348,8 @@ export function GameMenu({
             <span className="menu-btn-icon">
               <ChambersIcon />
             </span>
-            <span className="menu-btn-label">Chambers</span>
-            <span className="menu-btn-badge">{selectedLevel.order <= 9 ? `0${selectedLevel.order}` : '∞'}</span>
+            <span className="menu-btn-label">Stages (1–4 · S1–S4)</span>
+            <span className="menu-btn-badge">{selectedLevel.code}</span>
           </button>
 
           <button
@@ -381,7 +446,7 @@ export function GameMenu({
               <h2>
                 {activePanel === 'squad' &&
                   `Squad Lobby (${connectedPlayers.length}/${room?.maxPlayers ?? 8})`}
-                {activePanel === 'chambers' && 'Select Chamber & Modifiers'}
+                {activePanel === 'chambers' && 'Stages (1–4 & Special S1–S4)'}
                 {activePanel === 'leaderboard' && 'Leaderboard & Profile'}
                 {activePanel === 'settings' && 'Settings & Accessibility'}
                 {activePanel === 'howto' && 'How to Play'}
@@ -533,51 +598,19 @@ export function GameMenu({
                   </p>
                 )}
 
-                {CAMPAIGN_LEVELS.map((lvl) => {
-                  const isSelected = selectedLevel.id === lvl.id;
-                  return (
-                    <div
-                      key={lvl.id}
-                      className={`chamber-card surface ${isSelected ? 'chamber-card-live' : ''}`}
-                    >
-                      <div className="chamber-card-head">
-                        <strong>
-                          {lvl.name} · {lvl.title}
-                        </strong>
-                        <span className="pill pill-accent">{lvl.mechanicTag}</span>
-                      </div>
-                      <p className="muted-note">{lvl.subtitle}</p>
-                      <div className="chamber-card-foot">
-                        <span className="log-time">
-                          Gold Par: {formatMs(lvl.parTimeMs.gold)}
-                        </span>
-                        {isHost && (
-                          <div className="chamber-card-btns">
-                            {!isSelected && (
-                              <button
-                                type="button"
-                                className="btn btn-secondary btn-compact"
-                                onClick={() => onSelectLevel({ levelId: lvl.id })}
-                              >
-                                Select
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              className="btn btn-primary btn-compact"
-                              onClick={() => {
-                                setActivePanel(null);
-                                onStartGame({ levelId: lvl.id });
-                              }}
-                            >
-                              Play
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+                <div className="stage-tier-header">
+                  <span className="stage-tier-title">Standard Stages</span>
+                  <span className="stage-tier-badge">1 · 2 · 3 · 4</span>
+                </div>
+                {NORMAL_LEVELS.map(renderStageCard)}
+
+                <div className="stage-tier-header stage-tier-header-special">
+                  <span className="stage-tier-title">Special Stages</span>
+                  <span className="stage-tier-badge stage-tier-badge-special">
+                    S1 · S2 · S3 · S4
+                  </span>
+                </div>
+                {SPECIAL_LEVELS.map(renderStageCard)}
 
                 {/* Deterministic Procedural Lab (Zero AI!) */}
                 <div
@@ -693,9 +726,14 @@ export function GameMenu({
                 <div className="filter-pills">
                   {[
                     { id: 'all', label: 'All' },
-                    { id: 'chamber-01', label: '01' },
-                    { id: 'chamber-02', label: '02' },
-                    { id: 'chamber-03', label: '03' },
+                    { id: 'chamber-01', label: '1' },
+                    { id: 'chamber-02', label: '2' },
+                    { id: 'chamber-03', label: '3' },
+                    { id: 'chamber-04', label: '4' },
+                    { id: 'stage-s1', label: 'S1' },
+                    { id: 'stage-s2', label: 'S2' },
+                    { id: 'stage-s3', label: 'S3' },
+                    { id: 'stage-s4', label: 'S4' },
                     { id: 'procedural', label: 'Labs' },
                   ].map((f) => (
                     <button
@@ -823,9 +861,34 @@ export function GameMenu({
                   />
                 </label>
 
-                <button type="button" className="btn btn-secondary" onClick={toggleFullscreen}>
-                  Toggle Fullscreen Display
-                </button>
+                <label className="setting-row surface">
+                  <div>
+                    <strong>Fill Screen (Edge-to-Edge)</strong>
+                    <p className="muted-note">
+                      Scales gameplay edge-to-edge inside Discord with zero black letterbox bars
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.fillViewport}
+                    onChange={(e) => onUpdateSettings({ fillViewport: e.target.checked })}
+                  />
+                </label>
+
+                <label className="setting-row surface">
+                  <div>
+                    <strong>Cinema Mode (Minimal HUD)</strong>
+                    <p className="muted-note">
+                      Hides extra HUD &amp; control hints during play for maximum screen space (Key{' '}
+                      <code>F</code>)
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.cinemaMode}
+                    onChange={(e) => onUpdateSettings({ cinemaMode: e.target.checked })}
+                  />
+                </label>
               </div>
             )}
 
@@ -835,30 +898,28 @@ export function GameMenu({
                   <strong>Controls (Keyboard, Gamepad &amp; Mobile Touch)</strong>
                   <p className="muted-note">
                     Move: <code>A/D</code> or <code>←/→</code> · Jump: <code>W/↑/Space</code> ·
-                    Quick Emotes: <code>1–4</code> · Restart: <code>R</code> · Options:{' '}
-                    <code>Esc</code> · Solo Partner Swap: <code>Tab</code>. Controllers work
-                    automatically!
+                    Cinema Full View: <code>F</code> · Emotes: <code>1–4</code> · Restart:{' '}
+                    <code>R</code> · Options: <code>Esc</code> · Solo Partner Swap:{' '}
+                    <code>Tab</code>. Controllers work automatically!
                   </p>
                 </div>
                 <div className="surface howto-item">
-                  <strong>Chamber 01 · Stacking &amp; Vault Plates</strong>
+                  <strong>Standard Stages (1 · 2 · 3 · 4)</strong>
                   <p className="muted-note">
-                    Jump onto teammates&apos; flat heads to climb high ledges, power &amp; lock the
-                    energy bridge, and stand on plates <code>A + B</code> together.
+                    <strong>1 Synchrony:</strong> Head-stacking, bridge locks &amp; dual vault
+                    plates. <strong>2 Cadence:</strong> Moving ferries, security keys &amp; timed
+                    bridges. <strong>3 Leverage:</strong> Push ×1 &amp; ×2 cooperative crates.{' '}
+                    <strong>4 Relay:</strong> Bounce pads, laser overrides, crumbling ledges &amp;
+                    checkpoints!
                   </p>
                 </div>
                 <div className="surface howto-item">
-                  <strong>Chamber 02 · Moving Platforms, Timed Bridge &amp; Keys</strong>
+                  <strong>Special Stages (S1 · S2 · S3 · S4)</strong>
                   <p className="muted-note">
-                    Ride ferries &amp; lifts to collect floating Security Keys, unlock laser gates,
-                    and sprint across the 5-second timed bridge together.
-                  </p>
-                </div>
-                <div className="surface howto-item">
-                  <strong>Chamber 03 · Cooperative ×1 &amp; ×2 Push Crates</strong>
-                  <p className="muted-note">
-                    Push light <code>×1</code> crates onto weight plates to power cargo lifts, and
-                    team up with 2 players to shove heavy <code>×2</code> crates into place!
+                    <strong>S1 Skyline:</strong> Vertical ascent with one-way ledges &amp; dual
+                    bouncers. <strong>S2 Crossfire:</strong> Dual laser corridors &amp; fast ferries.{' '}
+                    <strong>S3 Foundry:</strong> Multi-crate laser &amp; bridge engineering.{' '}
+                    <strong>S4 Apex:</strong> The grand finale combining every mechanic!
                   </p>
                 </div>
               </div>

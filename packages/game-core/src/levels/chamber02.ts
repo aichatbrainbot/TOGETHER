@@ -1,45 +1,48 @@
 import type { LevelDefinition } from '../types.js';
 
 /**
- * Chamber 02: Cadence (Timing)
- * Mechanics: Moving Ferry Platform, Vertical Lift Platform, Timed 5s Energy Bridge, Key & Locked Security Gate.
+ * Stage 2: Cadence (Medium ★★☆☆☆)
+ * Fixed kinematics: BOTH Pit 1 (168 px) and Pit 2 (168 px) exceed horizontal jump reach (~113 px).
  */
 export const LEVEL_CHAMBER_02: LevelDefinition = {
   id: 'chamber-02',
+  code: '2',
+  tier: 'normal',
+  difficulty: 2,
   order: 2,
-  name: 'CHAMBER 02',
+  name: 'STAGE 2',
   title: 'Cadence',
-  subtitle: 'Time the moving ferry, grab the upper security key, and cross the timed bridge together.',
+  subtitle: 'Ride the ferry & lift to grab the key, then sprint across the 5s timed bridge.',
   mechanicTag: 'TIMING',
+  themeAccent: '#38BDF8',
   parTimeMs: {
     gold: 40_000,
     silver: 75_000,
   },
   width: 800,
   height: 448,
-  spawnOriginX: 36,
+  spawnOriginX: 32,
   spawnFloorY: 384,
   solids: [
-    // Outer frame
     { x: 0, y: 0, w: 800, h: 24 },
     { x: 0, y: 24, w: 24, h: 424 },
     { x: 776, y: 24, w: 24, h: 424 },
-    // West spawn deck (24..200)
-    { x: 24, y: 384, w: 176, h: 64 },
-    // Mid hub island (368..520, y=360)
-    { x: 368, y: 360, w: 152, h: 88 },
-    // Upper key catwalk (456..592, y=208)
-    { x: 456, y: 208, w: 136, h: 16 },
-    // East vault floor (656..776, y=360)
-    { x: 656, y: 360, w: 120, h: 88 },
-    // Security bulkhead above gate_east so players must unlock the gate with key_east
-    { x: 682, y: 24, w: 16, h: 264 },
+    // West spawn deck (24..192, fits 8P cleanly)
+    { x: 24, y: 384, w: 168, h: 64 },
+    // Mid hub island (360..484, y=360)
+    { x: 360, y: 360, w: 124, h: 88 },
+    // Upper key catwalk (444..576, y=208)
+    { x: 444, y: 208, w: 132, h: 16 },
+    // East vault floor (652..776, y=360)
+    { x: 652, y: 360, w: 124, h: 88 },
+    // Security bulkhead above gate_east
+    { x: 678, y: 24, w: 16, h: 264 },
   ],
   hazards: [
-    // West chasm beneath moving ferry
-    { x: 200, y: 420, w: 168, h: 28 },
-    // East chasm beneath timed bridge
-    { x: 520, y: 420, w: 136, h: 28 },
+    // Pit 1: 168 px (impassable without ferry)
+    { x: 192, y: 420, w: 168, h: 28 },
+    // Pit 2: 168 px (FIXED: impassable without 5s timed bridge!)
+    { x: 484, y: 420, w: 168, h: 28 },
   ],
   switches: [
     {
@@ -47,8 +50,8 @@ export const LEVEL_CHAMBER_02: LevelDefinition = {
       label: '5s BRIDGE',
       kind: 'timed',
       accent: 'violet',
-      durationTicks: 300, // 5.0 seconds
-      x: 454,
+      durationTicks: 300,
+      x: 432,
       y: 352,
       w: 44,
       h: 8,
@@ -57,9 +60,9 @@ export const LEVEL_CHAMBER_02: LevelDefinition = {
   bridges: [
     {
       id: 'bridge_timed',
-      x: 520,
+      x: 484,
       y: 360,
-      w: 136,
+      w: 168,
       h: 14,
       poweredBySwitchId: 'timed_bridge_sw',
       timedBySwitchId: 'timed_bridge_sw',
@@ -68,25 +71,25 @@ export const LEVEL_CHAMBER_02: LevelDefinition = {
   movingPlatforms: [
     {
       id: 'plat_ferry',
-      startX: 208,
+      startX: 200,
       startY: 362,
-      endX: 304,
+      endX: 296,
       endY: 362,
       w: 58,
       h: 14,
       cycleSeconds: 4.4,
       phaseOffset: 0,
-      accent: 'mint',
+      accent: 'sky',
     },
     {
       id: 'plat_lift',
-      startX: 382,
+      startX: 372,
       startY: 298,
-      endX: 382,
-      endY: 210,
-      w: 58,
+      endX: 372,
+      endY: 208,
+      w: 54,
       h: 14,
-      cycleSeconds: 4.2,
+      cycleSeconds: 4.0,
       phaseOffset: 0.25,
       accent: 'violet',
     },
@@ -95,10 +98,10 @@ export const LEVEL_CHAMBER_02: LevelDefinition = {
   keys: [
     {
       id: 'key_east',
-      x: 524,
-      y: 176,
+      x: 510,
+      y: 174,
       unlocksGateId: 'gate_east',
-      accent: 'mint',
+      accent: 'gold',
     },
   ],
   lockedGates: [
@@ -106,13 +109,13 @@ export const LEVEL_CHAMBER_02: LevelDefinition = {
       id: 'gate_east',
       label: 'KEY',
       accent: 'mint',
-      x: 682,
+      x: 678,
       y: 288,
       w: 16,
       h: 72,
     },
   ],
-  exitDoor: { x: 720, y: 312, w: 44, h: 48 },
+  exitDoor: { x: 718, y: 312, w: 44, h: 48 },
   requiresVaultSwitches: false,
   wires: [
     {
@@ -120,16 +123,16 @@ export const LEVEL_CHAMBER_02: LevelDefinition = {
       accent: 'violet',
       linkedTo: 'timed_bridge_sw',
       points: [
-        { x: 476, y: 360 },
-        { x: 476, y: 384 },
-        { x: 520, y: 384 },
-        { x: 520, y: 367 },
+        { x: 454, y: 360 },
+        { x: 454, y: 384 },
+        { x: 484, y: 384 },
+        { x: 484, y: 367 },
       ],
     },
   ],
   cues: [
-    { x: 284, y: 326, text: 'RIDE FERRY →', accent: 'mint' },
-    { x: 524, y: 152, text: 'SECURITY KEY', accent: 'mint' },
-    { x: 588, y: 334, text: 'TIMED 5s BRIDGE', accent: 'violet' },
+    { x: 276, y: 326, text: 'RIDE FERRY →', accent: 'mint' },
+    { x: 510, y: 146, text: 'SECURITY KEY', accent: 'amber' },
+    { x: 568, y: 334, text: 'TIMED 5s BRIDGE', accent: 'violet' },
   ],
 };

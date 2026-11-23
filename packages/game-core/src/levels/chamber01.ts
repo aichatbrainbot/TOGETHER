@@ -1,38 +1,37 @@
 import type { LevelDefinition } from '../types.js';
 
 /**
- * Chamber 01: Synchrony (Cooperation)
- * Mechanics: Head-stacking, Hold Energy Bridge, Permanent Lock Switch, Dual Vault Plates.
+ * Stage 1: Synchrony (Easy ★☆☆☆☆)
+ * Mechanics: Head-stacking onto 88 px High Ledge, Hold Energy Bridge, Permanent Lock, Dual Vault Plates.
  */
 export const LEVEL_CHAMBER_01: LevelDefinition = {
   id: 'chamber-01',
+  code: '1',
+  tier: 'normal',
+  difficulty: 1,
   order: 1,
-  name: 'CHAMBER 01',
+  name: 'STAGE 1',
   title: 'Synchrony',
-  subtitle: 'Stack on teammates, lock the energy bridge, and unlock the vault together.',
+  subtitle: 'Stack on teammates, lock the energy bridge, and hold A + B together.',
   mechanicTag: 'COOPERATION',
+  themeAccent: '#67E8F9',
   parTimeMs: {
     gold: 35_000,
     silver: 65_000,
   },
   width: 800,
   height: 448,
-  spawnOriginX: 44,
+  spawnOriginX: 40,
   spawnFloorY: 384,
   solids: [
-    // Outer boundary frame
     { x: 0, y: 0, w: 800, h: 24 },
     { x: 0, y: 24, w: 24, h: 424 },
     { x: 776, y: 24, w: 24, h: 424 },
-    // West main floor
     { x: 24, y: 384, w: 312, h: 64 },
-    // High Ledge (88 px above floor -> requires player stacking!)
+    // High Ledge (88 px above floor -> strictly requires head-stacking!)
     { x: 208, y: 296, w: 104, h: 14 },
-    // Left playful shelf
     { x: 40, y: 320, w: 72, h: 14 },
-    // East vault floor
     { x: 512, y: 384, w: 264, h: 64 },
-    // Pit walls
     { x: 320, y: 384, w: 16, h: 64 },
     { x: 512, y: 384, w: 16, h: 64 },
   ],

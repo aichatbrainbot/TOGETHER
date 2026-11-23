@@ -3,10 +3,13 @@ import {
   type EmotePingId,
   type GameWorldState,
   INPUT_BITS,
+  PHYSICS,
   type SimEvent,
   type SimPlayerState,
+  cloneGameWorld,
   getNextLevelId,
   resolveLevel,
+  stepGameWorld,
 } from '@together/game-core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { type ActiveEmote, GameRenderer, type RenderedPlayerPose } from '../game/GameRenderer.js';
@@ -28,10 +31,12 @@ interface GameStageProps {
   emotesByPlayerId: ReadonlyMap<string, ActiveEmote>;
   emoteSeq: number;
   localUserId: string;
+  mode: 'discord' | 'local-dev';
   isHost: boolean;
   pingMs: number | null;
   settings: GameSettings;
   onUpdateSettings: (patch: Partial<GameSettings>) => void;
+  onSetLandscape?: (locked: boolean) => void;
   onSendInput: (seq: number, buttons: number) => void;
   onSendEmote: (emote: EmotePingId) => void;
   onSwapSolo: () => void;
@@ -55,10 +60,12 @@ export function GameStage({
   emotesByPlayerId,
   emoteSeq,
   localUserId,
+  mode,
   isHost,
   pingMs,
   settings,
   onUpdateSettings,
+  onSetLandscape,
   onSendInput,
   onSendEmote,
   onSwapSolo,
@@ -79,8 +86,22 @@ export function GameStage({
   );
 
   const latestWorldRef = useRef<GameWorldState>(world);
+  const predictedWorldRef = useRef<GameWorldState>(cloneGameWorld(world));
+  const predAccumRef = useRef<number>(0);
+  const visualErrRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const prevSnapMetaRef = useRef<{
+    levelId: string;
+    respawnCount: number;
+    controlledId: string;
+  }>({
+    levelId: world.levelId,
+    respawnCount: world.respawnCount,
+    controlledId: world.soloPractice ? (world.soloActiveId ?? localUserId) : localUserId,
+  });
+
   const activeLevelRef = useRef(activeLevel);
   const settingsRef = useRef<GameSettings>(settings);
+  const pingMsRef = useRef<number | null>(pingMs);
   const emotesRef = useRef<ReadonlyMap<string, ActiveEmote>>(emotesByPlayerId);
   const viewportRef = useRef<{ w: number; h: number }>({
     w: activeLevel.width,
@@ -101,7 +122,16 @@ export function GameStage({
 
   activeLevelRef.current = activeLevel;
   settingsRef.current = settings;
+  pingMsRef.current = pingMs;
   emotesRef.current = emotesByPlayerId;
+
+  // Lock Discord mobile orientation to landscape during active gameplay
+  useEffect(() => {
+    onSetLandscape?.(true);
+    return () => {
+      onSetLandscape?.(false);
+    };
+  }, [onSetLandscape]);
 
   useEffect(() => {
     soundRef.current?.setMuted(!settings.soundEnabled);
@@ -115,16 +145,77 @@ export function GameStage({
     }
   }, [emoteSeq]);
 
-  // Keep latest authoritative snapshot in ref & trigger event VFX/SFX once per batch
+  const computeButtons = useCallback((): number => {
+    let bits = touchBitsRef.current | gamepadBitsRef.current;
+    const keys = keysRef.current;
+    if (keys.has('ArrowLeft') || keys.has('KeyA')) bits |= INPUT_BITS.LEFT;
+    if (keys.has('ArrowRight') || keys.has('KeyD')) bits |= INPUT_BITS.RIGHT;
+    if (keys.has('ArrowUp') || keys.has('KeyW') || keys.has('Space')) bits |= INPUT_BITS.JUMP;
+    return bits;
+  }, []);
+
+  // Reconcile authoritative 30 Hz server snapshot with local 60 Hz client prediction
   useEffect(() => {
     latestWorldRef.current = world;
 
+    const controlledId = world.soloPractice ? (world.soloActiveId ?? localUserId) : localUserId;
+    const prevMeta = prevSnapMetaRef.current;
+    const hardReset =
+      prevMeta.levelId !== world.levelId ||
+      prevMeta.respawnCount !== world.respawnCount ||
+      prevMeta.controlledId !== controlledId ||
+      world.status !== 'playing';
+
+    prevSnapMetaRef.current = {
+      levelId: world.levelId,
+      respawnCount: world.respawnCount,
+      controlledId,
+    };
+
     const poses = posesRef.current;
+    const oldControlledPose = poses.get(controlledId);
+
+    // Clone authoritative world and fast-forward by half-RTT ticks for responsive local feel
+    const reconciled = cloneGameWorld(world);
+    if (!hardReset && world.status === 'playing') {
+      const rtt = pingMsRef.current ?? 55;
+      const halfRttTicks = Math.min(4, Math.max(0, Math.round((rtt * 0.5) / (PHYSICS.DT * 1000))));
+      const curBits = computeButtons();
+      for (let t = 0; t < halfRttTicks; t += 1) {
+        stepGameWorld(reconciled, { [controlledId]: { buttons: curBits } }, activeLevelRef.current);
+      }
+    }
+
+    predictedWorldRef.current = reconciled;
+    predAccumRef.current = 0;
+
+    const predControlled = reconciled.players.find((p) => p.id === controlledId);
+    if (hardReset || !oldControlledPose || !predControlled) {
+      visualErrRef.current = { x: 0, y: 0 };
+    } else {
+      const dx = oldControlledPose.x - predControlled.x;
+      const dy = oldControlledPose.y - predControlled.y;
+      if (Math.hypot(dx, dy) > 76) {
+        visualErrRef.current = { x: 0, y: 0 };
+      } else {
+        visualErrRef.current = { x: dx, y: dy };
+      }
+    }
+
     const validIds = new Set<string>();
     for (const p of world.players) {
       validIds.add(p.id);
       const existing = poses.get(p.id);
-      if (!existing || Math.hypot(existing.x - p.x, existing.y - p.y) > 96) {
+      if (p.id === controlledId && predControlled) {
+        poses.set(p.id, {
+          x: predControlled.x + visualErrRef.current.x,
+          y: predControlled.y + visualErrRef.current.y,
+          vx: predControlled.vx,
+          vy: predControlled.vy,
+          facing: predControlled.facing,
+          grounded: predControlled.grounded,
+        });
+      } else if (!existing || hardReset || Math.hypot(existing.x - p.x, existing.y - p.y) > 96) {
         poses.set(p.id, {
           x: p.x,
           y: p.y,
@@ -152,7 +243,7 @@ export function GameStage({
         }
       }
     }
-  }, [world, events, eventBatchId]);
+  }, [world, events, eventBatchId, localUserId, computeButtons]);
 
   // True edge-to-edge full-screen canvas sizing (DPR-aware)
   useEffect(() => {
@@ -184,15 +275,6 @@ export function GameStage({
     };
   }, []);
 
-  const computeButtons = useCallback((): number => {
-    let bits = touchBitsRef.current | gamepadBitsRef.current;
-    const keys = keysRef.current;
-    if (keys.has('ArrowLeft') || keys.has('KeyA')) bits |= INPUT_BITS.LEFT;
-    if (keys.has('ArrowRight') || keys.has('KeyD')) bits |= INPUT_BITS.RIGHT;
-    if (keys.has('ArrowUp') || keys.has('KeyW') || keys.has('Space')) bits |= INPUT_BITS.JUMP;
-    return bits;
-  }, []);
-
   const flushInput = useCallback(
     (force = false) => {
       const bits = computeButtons();
@@ -205,7 +287,21 @@ export function GameStage({
     [computeButtons, onSendInput],
   );
 
-  // Keyboard controls, emote hotkeys (1-4), Esc pause overlay, blur safety release
+  // Discord-safe Cinema Mode expansion (plus native fullscreen fallback ONLY outside Discord)
+  const toggleCinemaExpand = useCallback(() => {
+    const nextCinema = !settingsRef.current.cinemaMode;
+    onUpdateSettings({ cinemaMode: nextCinema });
+
+    if (mode === 'local-dev') {
+      if (nextCinema && !document.fullscreenElement) {
+        void document.documentElement.requestFullscreen?.().catch(() => {});
+      } else if (!nextCinema && document.fullscreenElement) {
+        void document.exitFullscreen?.().catch(() => {});
+      }
+    }
+  }, [mode, onUpdateSettings]);
+
+  // Keyboard controls, emote hotkeys (1-4), F Cinema Mode, Esc pause overlay, blur safety release
   useEffect(() => {
     const preventKeys = new Set([
       'ArrowLeft',
@@ -225,6 +321,11 @@ export function GameStage({
 
       if (e.code === 'Escape') {
         setPauseOpen((open) => !open);
+        return;
+      }
+
+      if (e.code === 'KeyF') {
+        toggleCinemaExpand();
         return;
       }
 
@@ -280,9 +381,9 @@ export function GameStage({
       window.removeEventListener('blur', onBlur);
       onSendInput(seqRef.current + 1, 0);
     };
-  }, [flushInput, onRestartLevel, onSendEmote, onSendInput, onSwapSolo]);
+  }, [flushInput, onRestartLevel, onSendEmote, onSendInput, onSwapSolo, toggleCinemaExpand]);
 
-  // 60 FPS full-screen animation loop + Gamepad API polling + smooth interpolation
+  // 60 FPS full-screen animation loop + local client-side prediction + Gamepad API polling
   useEffect(() => {
     let rafId = 0;
     let lastTime = performance.now();
@@ -328,10 +429,45 @@ export function GameStage({
       pollGamepad();
 
       const currentWorld = latestWorldRef.current;
+      const controlledId = currentWorld.soloPractice
+        ? (currentWorld.soloActiveId ?? localUserId)
+        : localUserId;
+
+      // Advance deterministic local prediction for instant movement & jump response
+      const predWorld = predictedWorldRef.current;
+      if (predWorld && predWorld.status === 'playing' && currentWorld.status === 'playing') {
+        predAccumRef.current = Math.min(predAccumRef.current + dtSec, PHYSICS.DT * 3);
+        const curBits = computeButtons();
+        while (predAccumRef.current >= PHYSICS.DT) {
+          predAccumRef.current -= PHYSICS.DT;
+          stepGameWorld(predWorld, { [controlledId]: { buttons: curBits } }, activeLevelRef.current);
+        }
+      }
+
+      // Exponentially decay any micro-reconciliation offset so corrections stay silky smooth
+      const errDecay = Math.exp(-22 * dtSec);
+      visualErrRef.current.x *= errDecay;
+      visualErrRef.current.y *= errDecay;
+      if (Math.abs(visualErrRef.current.x) < 0.08) visualErrRef.current.x = 0;
+      if (Math.abs(visualErrRef.current.y) < 0.08) visualErrRef.current.y = 0;
+
       const poses = posesRef.current;
       const smoothFactor = 1 - Math.exp(-24 * dtSec);
+      const predControlled = predWorld?.players.find((p) => p.id === controlledId);
 
       for (const p of currentWorld.players) {
+        if (p.id === controlledId && predControlled && currentWorld.status === 'playing') {
+          poses.set(p.id, {
+            x: predControlled.x + visualErrRef.current.x,
+            y: predControlled.y + visualErrRef.current.y,
+            vx: predControlled.vx,
+            vy: predControlled.vy,
+            facing: predControlled.facing,
+            grounded: predControlled.grounded,
+          });
+          continue;
+        }
+
         const pose = poses.get(p.id);
         if (!pose) {
           poses.set(p.id, {
@@ -360,6 +496,7 @@ export function GameStage({
             level: activeLevelRef.current,
             viewportWidth: viewportRef.current.w,
             viewportHeight: viewportRef.current.h,
+            fillViewport: settingsRef.current.fillViewport,
             showPlayerNames: settingsRef.current.showPlayerNames,
             colorblindShapes: settingsRef.current.colorblindShapes,
             highContrast: settingsRef.current.highContrast,
@@ -375,7 +512,7 @@ export function GameStage({
 
     rafId = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(rafId);
-  }, [flushInput, localUserId, onSwapSolo]);
+  }, [computeButtons, flushInput, localUserId, onSwapSolo]);
 
   const setTouchBit = (bit: number, active: boolean) => {
     soundRef.current?.unlock();
@@ -387,20 +524,16 @@ export function GameStage({
     flushInput(false);
   };
 
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      void document.documentElement.requestFullscreen?.().catch(() => {});
-    } else {
-      void document.exitFullscreen?.().catch(() => {});
-    }
-  };
-
   const controlledPlayer: SimPlayerState | undefined = useMemo(() => {
     const targetId = world.soloPractice ? (world.soloActiveId ?? localUserId) : localUserId;
     return world.players.find((p) => p.id === targetId);
   }, [world, localUserId]);
 
   const nextCampaignId = getNextLevelId(world.levelId);
+  const nextCampaignLevel = useMemo(
+    () => (nextCampaignId ? resolveLevel(nextCampaignId) : null),
+    [nextCampaignId],
+  );
   const isProcedural = world.levelId.startsWith('procedural');
   const displayTimeMs = world.completionTimeMs ?? world.elapsedMs;
   const goldParRemaining =
@@ -416,17 +549,30 @@ export function GameStage({
         aria-label={`TOGETHER? ${activeLevel.name} ${activeLevel.title}`}
       />
 
-      {/* Translucent Floating Top HUD */}
-      <div className="floating-hud">
+      {/* Translucent Floating Top HUD (auto-compacts in Cinema Mode) */}
+      <div className={`floating-hud ${settings.cinemaMode ? 'floating-hud-cinema' : ''}`}>
         <div className="hud-cluster">
-          <span className="hud-level-title">
-            {activeLevel.name} · {activeLevel.title.toUpperCase()}
+          <span
+            className={`hud-stage-badge ${
+              activeLevel.tier === 'special' ? 'hud-stage-badge-special' : ''
+            }`}
+            style={{
+              borderColor: activeLevel.themeAccent,
+              color: activeLevel.themeAccent,
+            }}
+          >
+            {activeLevel.code}
           </span>
-          <span className={`pill ${world.soloPractice ? 'pill-warning' : 'pill-accent'}`}>
-            {world.soloPractice
-              ? 'SOLO'
-              : `CO-OP · ${world.players.filter((p) => p.connected).length}P`}
-          </span>
+          {!settings.cinemaMode && (
+            <span className="hud-level-title">{activeLevel.title.toUpperCase()}</span>
+          )}
+          {!settings.cinemaMode && (
+            <span className={`pill ${world.soloPractice ? 'pill-warning' : 'pill-accent'}`}>
+              {world.soloPractice
+                ? 'SOLO'
+                : `CO-OP · ${world.players.filter((p) => p.connected).length}P`}
+            </span>
+          )}
           {world.modifier !== 'standard' && (
             <span className="pill pill-mint">
               {world.modifier === 'low_gravity' ? 'LOW-G' : 'SPEED RUN'}
@@ -437,13 +583,15 @@ export function GameStage({
           </span>
           {goldParRemaining !== null && (
             <span className="hud-stat">
-              Gold Par <code>{formatTimer(goldParRemaining)}</code>
+              Par <code>{formatTimer(goldParRemaining)}</code>
             </span>
           )}
-          <span className="hud-stat hud-respawns">
-            Respawns <code>{world.respawnCount}</code>
-          </span>
-          {pingMs !== null && (
+          {!settings.cinemaMode && (
+            <span className="hud-stat hud-respawns">
+              Falls <code>{world.respawnCount}</code>
+            </span>
+          )}
+          {!settings.cinemaMode && pingMs !== null && (
             <span className="hud-stat hud-ping">
               <code>{pingMs} ms</code>
             </span>
@@ -461,32 +609,44 @@ export function GameStage({
               Swap {controlledPlayer?.badge ?? 'P1'} [Tab]
             </button>
           )}
+          {!settings.cinemaMode && (
+            <button
+              type="button"
+              className={`hud-btn ${settings.fillViewport ? 'hud-btn-active' : ''}`}
+              onClick={() => onUpdateSettings({ fillViewport: !settings.fillViewport })}
+              title="Switch between Edge-to-Edge Fill and Classic 16:9 Fit"
+            >
+              {settings.fillViewport ? 'FILL' : 'FIT'}
+            </button>
+          )}
           <button
             type="button"
-            className="hud-btn hud-btn-icon"
-            onClick={() => onUpdateSettings({ soundEnabled: !settings.soundEnabled })}
-            title={settings.soundEnabled ? 'Mute sound' : 'Unmute sound'}
-            aria-label={settings.soundEnabled ? 'Mute sound' : 'Unmute sound'}
+            className={`hud-btn hud-btn-icon ${settings.cinemaMode ? 'hud-btn-active' : ''}`}
+            onClick={toggleCinemaExpand}
+            title={settings.cinemaMode ? 'Exit Cinema Mode (F)' : 'Cinema / Full View Mode (F)'}
+            aria-label={settings.cinemaMode ? 'Exit Cinema Mode' : 'Enter Cinema Mode'}
           >
-            {settings.soundEnabled ? <SoundOnIcon /> : <SoundOffIcon />}
+            <FullscreenIcon />
           </button>
+          {!settings.cinemaMode && (
+            <button
+              type="button"
+              className="hud-btn hud-btn-icon"
+              onClick={() => onUpdateSettings({ soundEnabled: !settings.soundEnabled })}
+              title={settings.soundEnabled ? 'Mute sound' : 'Unmute sound'}
+              aria-label={settings.soundEnabled ? 'Mute sound' : 'Unmute sound'}
+            >
+              {settings.soundEnabled ? <SoundOnIcon /> : <SoundOffIcon />}
+            </button>
+          )}
           <button
             type="button"
             className="hud-btn hud-btn-icon"
             onClick={() => setPauseOpen((v) => !v)}
-            title="Quick Settings (Esc)"
-            aria-label="Quick Settings"
+            title="Quick Options (Esc)"
+            aria-label="Quick Options"
           >
             <SettingsIcon width={15} height={15} />
-          </button>
-          <button
-            type="button"
-            className="hud-btn hud-btn-icon"
-            onClick={toggleFullscreen}
-            title="Toggle fullscreen"
-            aria-label="Toggle fullscreen"
-          >
-            <FullscreenIcon />
           </button>
           <button
             type="button"
@@ -495,7 +655,7 @@ export function GameStage({
             title="Restart level (R)"
           >
             <RestartIcon />
-            <span>Restart</span>
+            {!settings.cinemaMode && <span>Restart</span>}
           </button>
           {isHost && (
             <button type="button" className="hud-btn" onClick={onReturnLobby}>
@@ -507,42 +667,47 @@ export function GameStage({
 
       {/* Floating Bottom Control Hints, Quick Emotes, and Mobile Touch Controls */}
       <div className="floating-bottom-controls">
-        <div className="desktop-bottom-bar">
-          <div className="desktop-hints-pill">
-            <span>
-              <code>A/D</code> Move
-            </span>
-            <span>
-              <code>Space</code> Jump &amp; Stack
-            </span>
-            {world.soloPractice && (
+        {!settings.cinemaMode && (
+          <div className="desktop-bottom-bar">
+            <div className="desktop-hints-pill">
               <span>
-                <code>Tab</code> Swap
+                <code>A/D</code> Move
               </span>
-            )}
-            <span>
-              <code>R</code> Restart
-            </span>
-            <span>
-              <code>Esc</code> Options
-            </span>
-          </div>
+              <span>
+                <code>Space</code> Jump &amp; Stack
+              </span>
+              {world.soloPractice && (
+                <span>
+                  <code>Tab</code> Swap
+                </span>
+              )}
+              <span>
+                <code>F</code> Cinema
+              </span>
+              <span>
+                <code>R</code> Restart
+              </span>
+              <span>
+                <code>Esc</code> Options
+              </span>
+            </div>
 
-          <div className="emote-bar" aria-label="Quick Emote Pings">
-            {EMOTE_PINGS.map((em) => (
-              <button
-                key={em.id}
-                type="button"
-                className="emote-chip"
-                onClick={() => onSendEmote(em.id)}
-                title={`Ping "${em.label}" (Key ${em.key})`}
-              >
-                <span className="emote-key">{em.key}</span>
-                {em.label}
-              </button>
-            ))}
+            <div className="emote-bar" aria-label="Quick Emote Pings">
+              {EMOTE_PINGS.map((em) => (
+                <button
+                  key={em.id}
+                  type="button"
+                  className="emote-chip"
+                  onClick={() => onSendEmote(em.id)}
+                  title={`Ping "${em.label}" (Key ${em.key})`}
+                >
+                  <span className="emote-key">{em.key}</span>
+                  {em.label}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="touch-controls" aria-label="Touch Controls">
           <div className="touch-pad-left">
@@ -618,6 +783,22 @@ export function GameStage({
             </div>
             <div className="drawer-body settings-list">
               <label className="setting-row surface">
+                <span>Fill Screen (Edge-to-Edge)</span>
+                <input
+                  type="checkbox"
+                  checked={settings.fillViewport}
+                  onChange={(e) => onUpdateSettings({ fillViewport: e.target.checked })}
+                />
+              </label>
+              <label className="setting-row surface">
+                <span>Cinema Mode (Minimal HUD)</span>
+                <input
+                  type="checkbox"
+                  checked={settings.cinemaMode}
+                  onChange={(e) => onUpdateSettings({ cinemaMode: e.target.checked })}
+                />
+              </label>
+              <label className="setting-row surface">
                 <span>Sound Effects</span>
                 <input
                   type="checkbox"
@@ -689,7 +870,7 @@ export function GameStage({
         </div>
       )}
 
-      {/* Chamber Cleared Victory Overlay with Medals & Next Chamber Progression */}
+      {/* Chamber Cleared Victory Overlay with Medals & Next Stage Progression */}
       {world.status === 'completed' && (
         <div className="victory-overlay">
           <div className="panel victory-card">
@@ -706,7 +887,7 @@ export function GameStage({
                 <strong>{formatTimer(world.completionTimeMs ?? world.elapsedMs)}</strong>
               </div>
               <div className="surface stat-tile">
-                <span className="muted-label">Respawns</span>
+                <span className="muted-label">Falls</span>
                 <strong>{world.respawnCount}</strong>
               </div>
             </div>
@@ -717,7 +898,7 @@ export function GameStage({
                   className="btn btn-primary"
                   onClick={() => onStartNextLevel(nextCampaignId)}
                 >
-                  Next Chamber →
+                  Next: {nextCampaignLevel?.code ?? 'Stage'} →
                 </button>
               )}
               {isHost && isProcedural && (

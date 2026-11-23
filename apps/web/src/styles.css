@@ -1488,3 +1488,126 @@ code {
     display: none;
   }
 }
+
+/* --- Stage Tiers (1–4 & Special S1–S4) + Cinema Mode HUD --- */
+.stage-tier-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 2px 2px;
+}
+
+.stage-tier-header-special {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(251, 113, 133, 0.25);
+}
+
+.stage-tier-title {
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.stage-tier-badge {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.42);
+  color: #7dd3fc;
+}
+
+.stage-tier-badge-special {
+  background: rgba(244, 114, 182, 0.16);
+  border-color: rgba(244, 114, 182, 0.5);
+  color: #f9a8d4;
+}
+
+.chamber-title-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.stage-code-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1.5px solid var(--accent-secondary);
+  background: rgba(11, 13, 22, 0.85);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.stage-code-special {
+  background: rgba(34, 18, 38, 0.88);
+  box-shadow: 0 0 12px rgba(244, 114, 182, 0.22);
+}
+
+.chamber-card-special {
+  background: linear-gradient(135deg, rgba(36, 40, 56, 0.94), rgba(44, 30, 54, 0.72));
+}
+
+.difficulty-stars {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.chamber-meta-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.hud-stage-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 6px;
+  border: 1.5px solid var(--accent-secondary);
+  background: rgba(11, 13, 22, 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.hud-stage-badge-special {
+  box-shadow: 0 0 10px rgba(244, 114, 182, 0.35);
+}
+
+.hud-btn-active {
+  background: rgba(84, 214, 197, 0.24);
+  border-color: rgba(84, 214, 197, 0.75);
+  color: #b7faf0;
+}
+
+.floating-hud-cinema {
+  top: max(6px, env(safe-area-inset-top));
+  left: max(8px, env(safe-area-inset-left));
+  right: max(8px, env(safe-area-inset-right));
+}
+
+.floating-hud-cinema .hud-cluster {
+  padding: 3px 7px;
+  gap: 5px;
+  background: rgba(11, 13, 22, 0.52);
+  border-color: rgba(230, 234, 242, 0.12);
+}

@@ -51,6 +51,18 @@ export class SoundEngine {
       case 'land':
         this.tone(110, 68, 0.045, 'sine', 0.045, now);
         break;
+      case 'bounce':
+        this.tone(220, 680, 0.16, 'sine', 0.095, now);
+        this.tone(330, 880, 0.14, 'triangle', 0.055, now + 0.03);
+        break;
+      case 'crumble':
+        this.tone(190, 72, 0.16, 'sawtooth', 0.055, now);
+        break;
+      case 'checkpoint':
+        this.tone(523.25, 523.25, 0.09, 'triangle', 0.07, now);
+        this.tone(783.99, 783.99, 0.14, 'triangle', 0.075, now + 0.07);
+        this.tone(1046.5, 1046.5, 0.18, 'sine', 0.07, now + 0.14);
+        break;
       case 'switch_on':
         this.tone(520, 680, 0.07, 'square', 0.045, now);
         break;

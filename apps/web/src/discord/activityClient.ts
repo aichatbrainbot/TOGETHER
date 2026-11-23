@@ -1,4 +1,4 @@
-import { DiscordSDK, Events } from '@discord/embedded-app-sdk';
+import { Common, DiscordSDK, Events } from '@discord/embedded-app-sdk';
 import { buildDiscordAvatarUrl, sanitizeDisplayName } from '@together/game-core';
 
 export interface DiscordUserSummary {
@@ -21,6 +21,7 @@ export interface ActivitySessionContext {
   initialSdkParticipants: DiscordUserSummary[];
   onParticipantsUpdate: (cb: (participants: DiscordUserSummary[]) => void) => () => void;
   onLayoutModeUpdate: (cb: (layoutMode: number) => void) => () => void;
+  setLandscapeOrientation: (locked: boolean) => void;
   cleanup: () => void;
 }
 
@@ -212,7 +213,23 @@ export async function bootstrapDiscordActivity(
       layoutListeners.add(cb);
       return () => layoutListeners.delete(cb);
     },
+    setLandscapeOrientation(locked: boolean) {
+      if (platform !== 'mobile') return;
+      const lockState = locked
+        ? Common.OrientationLockStateTypeObject.LANDSCAPE
+        : Common.OrientationLockStateTypeObject.UNLOCKED;
+      void discordSdk.commands
+        .setOrientationLockState({ lock_state: lockState })
+        .catch(() => {});
+    },
     cleanup() {
+      if (platform === 'mobile') {
+        void discordSdk.commands
+          .setOrientationLockState({
+            lock_state: Common.OrientationLockStateTypeObject.UNLOCKED,
+          })
+          .catch(() => {});
+      }
       if (subscribedParticipants) {
         void discordSdk
           .unsubscribe(Events.ACTIVITY_INSTANCE_PARTICIPANTS_UPDATE, handleParticipantsEvent)
@@ -278,6 +295,7 @@ async function bootstrapLocalDevPreview(
     initialSdkParticipants: [data.user],
     onParticipantsUpdate: () => () => {},
     onLayoutModeUpdate: () => () => {},
+    setLandscapeOrientation: () => {},
     cleanup: () => {},
   };
 }

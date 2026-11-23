@@ -328,7 +328,7 @@ export function App() {
     );
   }
 
-  // Full-Screen Gameplay Stage (Chambers 01–03 & Procedural Labs)
+  // Full-Screen Gameplay Stage (Stages 1-4, S1-S4 & Procedural Labs)
   if (room?.phase === 'playing' && world) {
     return (
       <main className="game-viewport-root">
@@ -339,10 +339,12 @@ export function App() {
           emotesByPlayerId={emotesByPlayerId}
           emoteSeq={emoteSeq}
           localUserId={context.user.id}
+          mode={context.mode}
           isHost={Boolean(selfPlayer?.isHost)}
           pingMs={pingMs}
           settings={settings}
           onUpdateSettings={handleUpdateSettings}
+          onSetLandscape={context.setLandscapeOrientation}
           onSendInput={handleSendInput}
           onSendEmote={handleSendEmote}
           onSwapSolo={handleSwapSolo}

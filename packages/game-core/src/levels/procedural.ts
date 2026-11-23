@@ -90,7 +90,7 @@ export function generateProceduralChamber(rawSeed?: number | string | null): Lev
         w: 28,
         h: 28,
         requiredPushers: 1,
-        accent: 'mint',
+        accent: 'amber',
       });
     }
     movingPlatforms.push({
@@ -246,11 +246,15 @@ export function generateProceduralChamber(rawSeed?: number | string | null): Lev
 
   return {
     id: `procedural:${seed}`,
+    code: '∞',
+    tier: 'procedural',
+    difficulty: 3,
     order: 99,
     name: `LAB #${seed}`,
     title: `Procedural #${seed}`,
     subtitle: 'Deterministic seeded cooperative chamber (Zero AI).',
     mechanicTag: 'PROCEDURAL',
+    themeAccent: '#54D6C5',
     parTimeMs: {
       gold: 45_000,
       silver: 80_000,

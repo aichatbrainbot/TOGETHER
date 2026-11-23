@@ -1,29 +1,43 @@
 import type { ChallengeModifier } from './constants.js';
 
+/**
+ * Kinematic physics tuned using Celeste / Mario target-height formulas:
+ * - Target single jump height H = 76 px, time to apex T = 0.34 s
+ * - g_up = 2H / T^2 ≈ 1315 px/s^2, v0 = -2H / T ≈ -447 px/s
+ * - Apex hang (0.55x gravity when |vy| < 65 & holding jump) for precise air control
+ * - Snappy fall multiplier (1.45x gravity when vy > 0) eliminates sluggish floatiness
+ * - 5 px upward corner correction prevents unfair head-bonks on platform edges
+ * - Horizontal jump reach D ≈ 113 px -> safe gaps 72-96 px, impassable gaps >= 156 px
+ */
 export const PHYSICS = {
   TICK_RATE: 60,
   DT: 1 / 60,
   SNAPSHOT_INTERVAL_TICKS: 2, // 30 Hz broadcast
   PLAYER_WIDTH: 18,
   PLAYER_HEIGHT: 24,
-  MOVE_SPEED: 176,
-  GROUND_ACCEL: 1700,
-  GROUND_FRICTION: 1900,
-  AIR_ACCEL: 1150,
-  AIR_FRICTION: 260,
-  GRAVITY: 1280,
+  MOVE_SPEED: 182,
+  GROUND_ACCEL: 1850,
+  GROUND_FRICTION: 2050,
+  AIR_ACCEL: 1280,
+  AIR_FRICTION: 240,
+  GRAVITY: 1315,
+  APEX_GRAVITY_MULTIPLIER: 0.55,
+  APEX_VELOCITY_THRESHOLD: 65,
+  FALL_GRAVITY_MULTIPLIER: 1.45,
   LOW_GRAVITY_FACTOR: 0.76,
-  MAX_FALL_SPEED: 620,
-  JUMP_VELOCITY: -452,
-  JUMP_CUT_MULTIPLIER: 0.55,
+  MAX_FALL_SPEED: 660,
+  JUMP_VELOCITY: -456,
+  BOUNCE_VELOCITY: -610,
+  JUMP_CUT_MULTIPLIER: 0.52,
   JUMP_CUT_THRESHOLD: -150,
-  COYOTE_TICKS: 6,
-  JUMP_BUFFER_TICKS: 6,
+  CORNER_CORRECTION_PX: 5,
+  COYOTE_TICKS: 6, // 100 ms
+  JUMP_BUFFER_TICKS: 6, // 100 ms
   RESPAWN_INVULN_TICKS: 45,
   VAULT_CHARGE_TICKS: 15,
   EXIT_HOLD_TICKS: 10,
-  CRATE_PUSH_SPEED: 92,
-  CRATE_FRICTION: 1200,
+  CRATE_PUSH_SPEED: 96,
+  CRATE_FRICTION: 1250,
 } as const;
 
 export const INPUT_BITS = {
@@ -33,6 +47,7 @@ export const INPUT_BITS = {
 } as const;
 
 export type MedalTier = 'gold' | 'silver' | 'bronze';
+export type LevelTier = 'normal' | 'special' | 'procedural';
 
 export interface Rect {
   readonly x: number;
@@ -45,9 +60,9 @@ export interface SwitchDef extends Rect {
   readonly id: string;
   readonly label: string;
   readonly kind: 'hold' | 'latch' | 'vault' | 'timed';
-  readonly accent: 'violet' | 'mint';
-  readonly durationTicks?: number; // For 'timed' switches
-  readonly allowsCrate?: boolean; // Defaults to true for hold/latch/vault
+  readonly accent: 'violet' | 'mint' | 'amber';
+  readonly durationTicks?: number;
+  readonly allowsCrate?: boolean;
 }
 
 export interface BridgeDef extends Rect {
@@ -66,9 +81,33 @@ export interface MovingPlatformDef {
   readonly w: number;
   readonly h: number;
   readonly cycleSeconds: number;
-  readonly phaseOffset?: number; // 0..1
-  readonly poweredBySwitchId?: string; // Optional: only moves when switch is active/latched
-  readonly accent: 'violet' | 'mint';
+  readonly phaseOffset?: number;
+  readonly poweredBySwitchId?: string;
+  readonly accent: 'violet' | 'mint' | 'sky';
+}
+
+export interface BouncePadDef extends Rect {
+  readonly id: string;
+  readonly velocityY?: number;
+  readonly accent: 'mint' | 'amber';
+}
+
+export interface CrumblePlatformDef extends Rect {
+  readonly id: string;
+  readonly delayTicks?: number; // Default 50 (~0.83 s)
+  readonly respawnTicks?: number; // Default 144 (~2.4 s)
+}
+
+export interface LaserBeamDef extends Rect {
+  readonly id: string;
+  readonly disabledBySwitchId: string;
+  readonly alsoDisabledBySwitchId?: string;
+}
+
+export interface CheckpointDef extends Rect {
+  readonly id: string;
+  readonly spawnX: number;
+  readonly spawnFloorY: number;
 }
 
 export interface CrateDef {
@@ -78,7 +117,7 @@ export interface CrateDef {
   readonly w: number;
   readonly h: number;
   readonly requiredPushers: 1 | 2;
-  readonly accent: 'violet' | 'mint';
+  readonly accent: 'amber' | 'violet';
 }
 
 export interface KeyDef {
@@ -86,39 +125,43 @@ export interface KeyDef {
   readonly x: number;
   readonly y: number;
   readonly unlocksGateId: string;
-  readonly accent: 'violet' | 'mint';
+  readonly accent: 'gold' | 'mint' | 'violet';
 }
 
 export interface LockedGateDef extends Rect {
   readonly id: string;
   readonly label: string;
-  readonly accent: 'violet' | 'mint';
-  readonly unlockedBySwitchId?: string; // Optional switch-controlled barrier
+  readonly accent: 'violet' | 'mint' | 'amber';
+  readonly unlockedBySwitchId?: string;
 }
 
 export interface WireSegment {
   readonly id: string;
   readonly points: readonly { readonly x: number; readonly y: number }[];
-  readonly accent: 'violet' | 'mint';
-  readonly linkedTo: string; // switch id or 'exit'
+  readonly accent: 'violet' | 'mint' | 'amber' | 'danger';
+  readonly linkedTo: string;
 }
 
 export interface CueLabel {
   readonly x: number;
   readonly y: number;
   readonly text: string;
-  readonly accent: 'violet' | 'mint';
+  readonly accent: 'violet' | 'mint' | 'amber';
   readonly hideWhenSwitchLatched?: string;
   readonly hideWhenUnlocked?: boolean;
 }
 
 export interface LevelDefinition {
   readonly id: string;
+  readonly code: string; // '1' | '2' | '3' | '4' | 'S1' | 'S2' | 'S3' | 'S4' | '∞'
+  readonly tier: LevelTier;
+  readonly difficulty: 1 | 2 | 3 | 4 | 5;
   readonly order: number;
   readonly name: string;
   readonly title: string;
   readonly subtitle: string;
   readonly mechanicTag: string;
+  readonly themeAccent: string;
   readonly parTimeMs: {
     readonly gold: number;
     readonly silver: number;
@@ -128,10 +171,15 @@ export interface LevelDefinition {
   readonly spawnOriginX: number;
   readonly spawnFloorY: number;
   readonly solids: readonly Rect[];
+  readonly oneWayPlatforms?: readonly Rect[];
   readonly hazards: readonly Rect[];
   readonly switches: readonly SwitchDef[];
   readonly bridges: readonly BridgeDef[];
   readonly movingPlatforms: readonly MovingPlatformDef[];
+  readonly bouncePads?: readonly BouncePadDef[];
+  readonly crumblePlatforms?: readonly CrumblePlatformDef[];
+  readonly lasers?: readonly LaserBeamDef[];
+  readonly checkpoints?: readonly CheckpointDef[];
   readonly crates: readonly CrateDef[];
   readonly keys: readonly KeyDef[];
   readonly lockedGates: readonly LockedGateDef[];
@@ -145,6 +193,9 @@ export interface LevelDefinition {
 export type SimEventType =
   | 'jump'
   | 'land'
+  | 'bounce'
+  | 'crumble'
+  | 'checkpoint'
   | 'switch_on'
   | 'bridge_on'
   | 'bridge_lock'
@@ -215,6 +266,17 @@ export interface MovingPlatformRuntimeState {
   active: boolean;
 }
 
+export interface CrumbleRuntimeState {
+  id: string;
+  state: 'solid' | 'shaking' | 'gone';
+  timerTicks: number;
+}
+
+export interface LaserRuntimeState {
+  id: string;
+  active: boolean;
+}
+
 export interface CrateRuntimeState {
   id: string;
   x: number;
@@ -269,10 +331,13 @@ export interface GameWorldState {
   completionTimeMs: number | null;
   medal: MedalTier | null;
   respawnCount: number;
+  activeCheckpointId: string | null;
   players: SimPlayerState[];
   switches: SwitchRuntimeState[];
   bridges: BridgeRuntimeState[];
   movingPlatforms: MovingPlatformRuntimeState[];
+  crumblePlatforms: CrumbleRuntimeState[];
+  lasers: LaserRuntimeState[];
   crates: CrateRuntimeState[];
   keys: KeyRuntimeState[];
   lockedGates: LockedGateRuntimeState[];

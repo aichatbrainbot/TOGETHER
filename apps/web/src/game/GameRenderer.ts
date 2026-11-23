@@ -39,6 +39,13 @@ export interface ActiveEmote {
 
 const EMOTE_LABEL_MAP = new Map<EmotePingId, string>(EMOTE_PINGS.map((e) => [e.id, e.label]));
 
+/**
+ * High-contrast dark-theme Canvas2D pixel-art renderer.
+ * Uses 3-tier luminance figure-ground hierarchy (Celeste / Hollow Knight style):
+ *  - Layer 1 (Backdrop): deep calm midnight (#0B0D16 -> #121728)
+ *  - Layer 2 (Terrain): clearly separated cool slate (#28314A) with vivid 4px stage-accent floor caps
+ *  - Layer 3 (Interactive & Characters): luminous saturated hues with crisp dark outer outlines
+ */
 export class GameRenderer {
   private readonly particles: Particle[] = [];
   private animTime = 0;
@@ -51,30 +58,39 @@ export class GameRenderer {
           this.burst(ev.x, ev.y, color, 6, 48, -28, 0.26);
           break;
         case 'land':
-          this.burst(ev.x, ev.y, '#939BB2', 4, 38, -14, 0.2);
+          this.burst(ev.x, ev.y, '#9AA6C7', 4, 38, -14, 0.2);
+          break;
+        case 'bounce':
+          this.burst(ev.x, ev.y, color, 14, 90, -110, 0.42);
+          break;
+        case 'crumble':
+          this.burst(ev.x, ev.y, '#FFB84D', 12, 85, -35, 0.45);
+          break;
+        case 'checkpoint':
+          this.burst(ev.x, ev.y, '#4FF0D6', 18, 95, -95, 0.55);
           break;
         case 'switch_on':
           this.burst(ev.x, ev.y, color, 8, 65, -55, 0.34);
           break;
         case 'bridge_on':
         case 'bridge_lock':
-          this.burst(ev.x, ev.y, THEME_COLORS.secondaryAccent, 14, 95, -55, 0.45);
+          this.burst(ev.x, ev.y, '#4FF0D6', 14, 95, -55, 0.45);
           break;
         case 'key_pickup':
-          this.burst(ev.x, ev.y, THEME_COLORS.gold, 14, 85, -70, 0.48);
+          this.burst(ev.x, ev.y, '#FFD166', 16, 85, -70, 0.48);
           break;
         case 'gate_unlock':
           this.burst(ev.x, ev.y, color, 18, 105, -65, 0.55);
           break;
         case 'door_unlock':
-          this.burst(ev.x, ev.y, THEME_COLORS.secondaryAccent, 22, 115, -70, 0.6);
+          this.burst(ev.x, ev.y, '#4FF0D6', 22, 115, -70, 0.6);
           break;
         case 'respawn':
-          this.burst(ev.x, ev.y, THEME_COLORS.danger, 14, 95, -60, 0.45);
+          this.burst(ev.x, ev.y, '#FF4D6D', 16, 100, -65, 0.48);
           break;
         case 'level_complete':
-          this.burst(ev.x, ev.y, THEME_COLORS.primaryAccent, 20, 130, -90, 0.85);
-          this.burst(ev.x, ev.y, THEME_COLORS.secondaryAccent, 20, 130, -100, 0.9);
+          this.burst(ev.x, ev.y, '#A28BFF', 22, 135, -95, 0.85);
+          this.burst(ev.x, ev.y, '#4FF0D6', 22, 135, -105, 0.9);
           break;
       }
     }
@@ -94,6 +110,7 @@ export class GameRenderer {
       level?: LevelDefinition;
       viewportWidth?: number;
       viewportHeight?: number;
+      fillViewport?: boolean;
       showPlayerNames?: boolean;
       colorblindShapes?: boolean;
       highContrast?: boolean;
@@ -105,6 +122,7 @@ export class GameRenderer {
     const level = options.level ?? LEVEL_CHAMBER_01;
     const viewW = options.viewportWidth ?? level.width;
     const viewH = options.viewportHeight ?? level.height;
+    const fillViewport = options.fillViewport ?? true;
     const showNames = options.showPlayerNames ?? true;
     const colorblindShapes = options.colorblindShapes ?? false;
     const highContrast = options.highContrast ?? false;
@@ -118,55 +136,89 @@ export class GameRenderer {
     ctx.save();
     ctx.imageSmoothingEnabled = false;
 
-    // Seamless full-screen obsidian canvas fill
-    ctx.fillStyle = THEME_COLORS.background;
+    // Seamless full-viewport dark gradient backdrop
+    const outerBg = ctx.createLinearGradient(0, 0, 0, viewH);
+    outerBg.addColorStop(0, '#090B12');
+    outerBg.addColorStop(1, '#101424');
+    ctx.fillStyle = outerBg;
     ctx.fillRect(0, 0, viewW, viewH);
 
-    // Maximize 800x448 playable chamber edge-to-edge inside Discord window
-    const scale = Math.min(viewW / level.width, viewH / level.height);
-    const offsetX = Math.floor((viewW - level.width * scale) / 2);
-    const offsetY = Math.floor((viewH - level.height * scale) / 2);
+    // Compute clean transform:
+    // - `fillViewport=true` expands seamlessly to fill 100% of the Discord Activity viewport (up to 12% aspect flex)
+    //   so players NEVER see tiny boxed canvases or wasted margins!
+    // - `fillViewport=false` preserves exact 1:1 uniform aspect ratio.
+    const uniformScale = Math.min(viewW / level.width, viewH / level.height);
+    let scaleX = uniformScale;
+    let scaleY = uniformScale;
+    if (fillViewport) {
+      const rawScaleX = viewW / level.width;
+      const rawScaleY = viewH / level.height;
+      const aspectRatioDiff = Math.max(rawScaleX / rawScaleY, rawScaleY / rawScaleX);
+      if (aspectRatioDiff <= 1.18) {
+        // Fill 100% edge-to-edge on standard 16:9 / 16:10 / Discord split panes!
+        scaleX = rawScaleX;
+        scaleY = rawScaleY;
+      }
+    }
+
+    const offsetX = Math.floor((viewW - level.width * scaleX) / 2);
+    const offsetY = Math.floor((viewH - level.height * scaleY) / 2);
 
     ctx.translate(offsetX, offsetY);
-    ctx.scale(scale, scale);
+    ctx.scale(scaleX, scaleY);
 
-    // 1. Atmospheric chamber backdrop & watermark
+    // 1. Calm dark atmospheric chamber backdrop (low luminance so terrain & players POP!)
     this.drawBackground(ctx, level);
 
-    // 2. Subtle diegetic stencil cues
+    // 2. Crisp diegetic hint stencils
     this.drawChamberCues(ctx, level, world);
 
-    // 3. Recessed neon circuit wires
+    // 3. Glowing circuit wires
     this.drawWires(ctx, level, world);
 
-    // 4. Solid beveled pixel tiles
+    // 4. High-contrast beveled terrain with bright stage-accent floor caps
     this.drawSolids(ctx, level, highContrast);
 
-    // 5. Hazard plasma pits
+    // 5. One-way jump-through platforms
+    this.drawOneWayPlatforms(ctx, level);
+
+    // 6. Crumbling warning platforms
+    this.drawCrumblePlatforms(ctx, level, world);
+
+    // 7. Bright crimson plasma hazard pits
     this.drawHazards(ctx, level);
 
-    // 6. Retractable & timed neon bridges
+    // 8. Retractable & timed neon energy bridges
     this.drawBridges(ctx, level, world);
 
-    // 7. Moving platforms & guide tracks
+    // 9. Moving platforms & guide tracks
     this.drawMovingPlatforms(ctx, level, world, highContrast);
 
-    // 8. Locked security gates
+    // 10. Bounce / Spring pads
+    this.drawBouncePads(ctx, level);
+
+    // 11. Checkpoints
+    this.drawCheckpoints(ctx, level, world);
+
+    // 12. Switch-controlled laser beams
+    this.drawLasers(ctx, level, world);
+
+    // 13. Locked security gates
     this.drawLockedGates(ctx, level, world);
 
-    // 9. Cooperative pressure plates & timed/latch switches
+    // 14. Cooperative switches
     this.drawSwitches(ctx, level, world);
 
-    // 10. Pushable co-op crates (x1 and x2)
+    // 15. High-contrast Amber x1 & Violet x2 cooperative push crates
     this.drawCrates(ctx, level, world, highContrast);
 
-    // 11. Vault exit gate
+    // 16. Exit door portal
     this.drawExitDoor(ctx, level, world);
 
-    // 12. Floating / carried security keys
+    // 17. Radiant gold keys
     this.drawKeys(ctx, level, world);
 
-    // 13. Animated pixel-art players & emote bubbles
+    // 18. Crisp dark-outlined vivid pixel players + emotes
     const controlledId = world.soloPractice ? (world.soloActiveId ?? localUserId) : localUserId;
     const ordered = [...world.players].sort((a, b) => {
       if (a.id === controlledId) return 1;
@@ -199,7 +251,7 @@ export class GameRenderer {
       });
     }
 
-    // 14. Crisp pixel particles
+    // 19. Pixel particles
     if (!reducedMotion) {
       this.drawParticles(ctx);
     }
@@ -208,22 +260,28 @@ export class GameRenderer {
   }
 
   private drawBackground(ctx: CanvasRenderingContext2D, level: LevelDefinition): void {
-    ctx.fillStyle = THEME_COLORS.background;
+    const bg = ctx.createLinearGradient(0, 0, 0, level.height);
+    bg.addColorStop(0, '#0B0D16');
+    bg.addColorStop(0.6, '#111626');
+    bg.addColorStop(1, '#0E1220');
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, level.width, level.height);
 
-    const gradLeft = ctx.createRadialGradient(250, 270, 12, 250, 270, 240);
-    gradLeft.addColorStop(0, 'rgba(139, 114, 255, 0.08)');
-    gradLeft.addColorStop(1, 'rgba(16, 17, 22, 0)');
+    // Soft ambient pools tinted with stage accent
+    const gradLeft = ctx.createRadialGradient(230, 260, 14, 230, 260, 260);
+    gradLeft.addColorStop(0, `${level.themeAccent}18`);
+    gradLeft.addColorStop(1, 'rgba(11, 13, 22, 0)');
     ctx.fillStyle = gradLeft;
     ctx.fillRect(0, 0, level.width, level.height);
 
-    const gradRight = ctx.createRadialGradient(680, 330, 12, 680, 330, 240);
-    gradRight.addColorStop(0, 'rgba(84, 214, 197, 0.08)');
-    gradRight.addColorStop(1, 'rgba(16, 17, 22, 0)');
+    const gradRight = ctx.createRadialGradient(660, 310, 14, 660, 310, 250);
+    gradRight.addColorStop(0, 'rgba(84, 214, 197, 0.10)');
+    gradRight.addColorStop(1, 'rgba(11, 13, 22, 0)');
     ctx.fillStyle = gradRight;
     ctx.fillRect(0, 0, level.width, level.height);
 
-    ctx.strokeStyle = 'rgba(36, 40, 56, 0.42)';
+    // Subtle low-contrast blueprint grid (never fights terrain)
+    ctx.strokeStyle = 'rgba(56, 68, 98, 0.22)';
     ctx.lineWidth = 1;
     for (let x = 32; x < level.width; x += 32) {
       ctx.beginPath();
@@ -238,16 +296,11 @@ export class GameRenderer {
       ctx.stroke();
     }
 
-    ctx.fillStyle = 'rgba(27, 30, 41, 0.52)';
-    ctx.fillRect(148, 24, 16, 360);
-    ctx.fillRect(628, 24, 16, 360);
-
-    // Subtle chamber index stencil
-    const stamp = level.order <= 9 ? `0${level.order}` : '∞';
-    ctx.fillStyle = 'rgba(230, 234, 242, 0.045)';
-    ctx.font = '800 56px monospace';
+    // Subtle background watermark with stage code (1..4, S1..S4, ∞)
+    ctx.fillStyle = 'rgba(230, 234, 242, 0.06)';
+    ctx.font = '900 62px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(stamp, 42, 92);
+    ctx.fillText(level.code, 42, 96);
   }
 
   private drawChamberCues(
@@ -256,14 +309,22 @@ export class GameRenderer {
     world: GameWorldState,
   ): void {
     const swMap = new Map(world.switches.map((s) => [s.id, s]));
-    ctx.font = '700 9px monospace';
+    ctx.font = '800 10px monospace';
     ctx.textAlign = 'center';
 
     for (const cue of level.cues) {
       if (cue.hideWhenUnlocked && world.exitDoor.unlocked) continue;
       if (cue.hideWhenSwitchLatched && swMap.get(cue.hideWhenSwitchLatched)?.latched) continue;
-      ctx.fillStyle =
-        cue.accent === 'mint' ? 'rgba(84, 214, 197, 0.45)' : 'rgba(139, 114, 255, 0.45)';
+      const color =
+        cue.accent === 'mint'
+          ? 'rgba(79, 240, 214, 0.82)'
+          : cue.accent === 'amber'
+            ? 'rgba(255, 200, 97, 0.85)'
+            : 'rgba(180, 155, 255, 0.85)';
+      ctx.fillStyle = 'rgba(11, 13, 22, 0.65)';
+      const tw = ctx.measureText(cue.text).width;
+      ctx.fillRect(cue.x - tw / 2 - 4, cue.y - 10, tw + 8, 13);
+      ctx.fillStyle = color;
       ctx.fillText(cue.text, cue.x, cue.y);
     }
   }
@@ -283,13 +344,19 @@ export class GameRenderer {
           : Boolean(sw?.pressed || sw?.latched || (sw && sw.remainingTicks > 0));
 
       const accent =
-        wire.accent === 'mint' ? THEME_COLORS.secondaryAccent : THEME_COLORS.primaryAccent;
+        wire.accent === 'mint'
+          ? '#4FF0D6'
+          : wire.accent === 'amber'
+            ? '#FFB84D'
+            : wire.accent === 'danger'
+              ? '#FF5C80'
+              : '#B49BFF';
 
       ctx.save();
       ctx.lineCap = 'square';
       ctx.lineJoin = 'miter';
 
-      ctx.strokeStyle = '#1D2130';
+      ctx.strokeStyle = '#181E30';
       ctx.lineWidth = 4;
       ctx.beginPath();
       wire.points.forEach((pt, idx) => {
@@ -298,11 +365,11 @@ export class GameRenderer {
       });
       ctx.stroke();
 
-      ctx.strokeStyle = isLit ? accent : '#2C3247';
+      ctx.strokeStyle = isLit ? accent : '#384363';
       ctx.lineWidth = 2;
       if (isLit) {
         ctx.shadowColor = accent;
-        ctx.shadowBlur = 8;
+        ctx.shadowBlur = 9;
       }
       ctx.stroke();
       ctx.restore();
@@ -314,42 +381,209 @@ export class GameRenderer {
     level: LevelDefinition,
     highContrast: boolean,
   ): void {
+    const trim = level.themeAccent;
     for (const rect of level.solids) {
-      ctx.fillStyle = THEME_COLORS.panel;
+      // Clearly separated medium-dark slate terrain body
+      ctx.fillStyle = '#28314A';
       ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
-      ctx.strokeStyle = '#141722';
-      ctx.lineWidth = 1;
+      // Tiled 16x16 beveled bricks with visible highlight & shadow
       for (let tx = rect.x; tx < rect.x + rect.w; tx += 16) {
         for (let ty = rect.y; ty < rect.y + rect.h; ty += 16) {
           const bw = Math.min(16, rect.x + rect.w - tx);
           const bh = Math.min(16, rect.y + rect.h - ty);
+          ctx.fillStyle = '#333F5E';
+          ctx.fillRect(tx + 1, ty + 1, bw - 2, 1);
+          ctx.strokeStyle = '#181E30';
+          ctx.lineWidth = 1;
           ctx.strokeRect(tx + 0.5, ty + 0.5, bw - 1, bh - 1);
         }
       }
 
-      ctx.fillStyle = highContrast ? '#3E4663' : THEME_COLORS.surface;
-      ctx.fillRect(rect.x, rect.y, rect.w, 3);
-      ctx.fillStyle = highContrast ? 'rgba(230, 234, 242, 0.55)' : 'rgba(139, 114, 255, 0.24)';
-      ctx.fillRect(rect.x, rect.y, rect.w, 1);
+      // Outer structural rim for crisp silhouette against background
+      ctx.strokeStyle = highContrast ? '#E6EAF2' : '#45547A';
+      ctx.lineWidth = highContrast ? 1.5 : 1;
+      ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+
+      // Luminous walkable floor cap on top edge (only on non-ceiling platforms!)
+      if (rect.y > 0) {
+        ctx.fillStyle = trim;
+        ctx.fillRect(rect.x, rect.y, rect.w, 4);
+        ctx.fillStyle = 'rgba(235, 242, 255, 0.72)';
+        ctx.fillRect(rect.x, rect.y, rect.w, 1);
+      }
+    }
+  }
+
+  private drawOneWayPlatforms(ctx: CanvasRenderingContext2D, level: LevelDefinition): void {
+    for (const ow of level.oneWayPlatforms ?? []) {
+      ctx.fillStyle = '#1F2C42';
+      ctx.fillRect(ow.x, ow.y, ow.w, ow.h);
+      ctx.fillStyle = '#67E8F9';
+      ctx.fillRect(ow.x, ow.y, ow.w, 3);
+      // Upward chevron notches signifying jump-through affordance
+      ctx.fillStyle = '#9CEEFF';
+      for (let x = ow.x + 10; x < ow.x + ow.w - 8; x += 18) {
+        ctx.fillRect(x, ow.y + 6, 6, 1);
+        ctx.fillRect(x + 2, ow.y + 5, 2, 1);
+      }
+    }
+  }
+
+  private drawCrumblePlatforms(
+    ctx: CanvasRenderingContext2D,
+    level: LevelDefinition,
+    world: GameWorldState,
+  ): void {
+    const defs = level.crumblePlatforms ?? [];
+    for (let i = 0; i < defs.length; i += 1) {
+      const def = defs[i]!;
+      const st = world.crumblePlatforms[i];
+      if (!st) continue;
+
+      if (st.state === 'gone') {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 184, 77, 0.35)';
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(def.x + 1, def.y + 1, def.w - 2, def.h - 2);
+        ctx.restore();
+        continue;
+      }
+
+      const jitterX = st.state === 'shaking' ? Math.round(Math.sin(this.animTime * 60) * 2) : 0;
+      const x = def.x + jitterX;
+      const y = def.y;
+
+      ctx.fillStyle = st.state === 'shaking' ? '#52341C' : '#3C2E22';
+      ctx.fillRect(x, y, def.w, def.h);
+      ctx.strokeStyle = st.state === 'shaking' ? '#FF7B3D' : '#F5A623';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x + 0.5, y + 0.5, def.w - 1, def.h - 1);
+
+      // Bright warning stripe on top
+      ctx.fillStyle = st.state === 'shaking' ? '#FF7B3D' : '#FFD166';
+      ctx.fillRect(x + 1, y + 1, def.w - 2, 3);
+
+      // Fracture lines
+      ctx.fillStyle = '#18120C';
+      ctx.fillRect(x + Math.round(def.w * 0.35), y + 4, 2, def.h - 5);
+      ctx.fillRect(x + Math.round(def.w * 0.68), y + 5, 2, def.h - 6);
+    }
+  }
+
+  private drawBouncePads(ctx: CanvasRenderingContext2D, level: LevelDefinition): void {
+    for (const pad of level.bouncePads ?? []) {
+      const color = pad.accent === 'amber' ? '#FFB84D' : '#4FF0D6';
+      const pulse = Math.round(Math.sin(this.animTime * 6) * 1);
+
+      // Dark housing base
+      ctx.fillStyle = '#20263A';
+      ctx.fillRect(pad.x, pad.y + 5, pad.w, pad.h - 5);
+
+      // Spring coils
+      ctx.fillStyle = '#9AA6C7';
+      ctx.fillRect(pad.x + 6, pad.y + 3, 3, 4);
+      ctx.fillRect(pad.x + pad.w - 9, pad.y + 3, 3, 4);
+
+      // Glowing launch cap
+      ctx.save();
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 10;
+      ctx.fillStyle = color;
+      ctx.fillRect(pad.x - 1, pad.y + pulse, pad.w + 2, 4);
+      ctx.fillStyle = '#E6EAF2';
+      ctx.fillRect(pad.x + 2, pad.y + pulse, pad.w - 4, 1);
+      ctx.restore();
+    }
+  }
+
+  private drawCheckpoints(
+    ctx: CanvasRenderingContext2D,
+    level: LevelDefinition,
+    world: GameWorldState,
+  ): void {
+    for (const cp of level.checkpoints ?? []) {
+      const active = world.activeCheckpointId === cp.id;
+      const poleX = cp.x + 6;
+      // Pole
+      ctx.fillStyle = active ? '#E6EAF2' : '#586485';
+      ctx.fillRect(poleX, cp.y + 4, 3, cp.h - 4);
+      ctx.fillStyle = '#2E3854';
+      ctx.fillRect(cp.x + 2, cp.y + cp.h - 4, 12, 4);
+
+      // Flag / beacon pennant
+      ctx.save();
+      if (active) {
+        ctx.shadowColor = '#4FF0D6';
+        ctx.shadowBlur = 12;
+      }
+      ctx.fillStyle = active ? '#4FF0D6' : '#3C4766';
+      const wave = active ? Math.round(Math.sin(this.animTime * 7) * 1.5) : 0;
+      ctx.fillRect(poleX + 3, cp.y + 5, 11, 8 + wave);
+      ctx.fillStyle = active ? '#101116' : '#717E9E';
+      ctx.font = '800 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(active ? 'CP' : '·', poleX + 8, cp.y + 12);
+      ctx.restore();
+    }
+  }
+
+  private drawLasers(
+    ctx: CanvasRenderingContext2D,
+    level: LevelDefinition,
+    world: GameWorldState,
+  ): void {
+    const defs = level.lasers ?? [];
+    for (let i = 0; i < defs.length; i += 1) {
+      const def = defs[i]!;
+      const state = world.lasers[i];
+      const active = state ? state.active : true;
+
+      // Top & bottom emitter housings
+      ctx.fillStyle = '#333F5E';
+      ctx.fillRect(def.x - 3, def.y, def.w + 6, 6);
+      ctx.fillRect(def.x - 3, def.y + def.h - 6, def.w + 6, 6);
+
+      if (!active) {
+        ctx.fillStyle = '#4FF0D6';
+        ctx.fillRect(def.x, def.y + 2, def.w, 2);
+        ctx.fillRect(def.x, def.y + def.h - 4, def.w, 2);
+        continue;
+      }
+
+      // High-contrast lethal crimson laser beam
+      ctx.save();
+      ctx.shadowColor = '#FF3B6B';
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = '#FF3B6B';
+      ctx.fillRect(def.x, def.y + 5, def.w, def.h - 10);
+      const corePulse = 0.75 + 0.25 * Math.sin(this.animTime * 22);
+      ctx.fillStyle = `rgba(255, 224, 234, ${corePulse.toFixed(2)})`;
+      ctx.fillRect(def.x + 2, def.y + 5, Math.max(2, def.w - 4), def.h - 10);
+      ctx.restore();
     }
   }
 
   private drawHazards(ctx: CanvasRenderingContext2D, level: LevelDefinition): void {
     for (const h of level.hazards) {
-      ctx.fillStyle = '#1F111A';
+      ctx.fillStyle = '#2B0D18';
       ctx.fillRect(h.x, h.y, h.w, h.h);
 
-      const pulse = 0.65 + 0.25 * Math.sin(this.animTime * 5);
-      ctx.fillStyle = `rgba(255, 107, 139, ${pulse.toFixed(2)})`;
-      ctx.fillRect(h.x, h.y + 4, h.w, 4);
+      const pulse = 0.75 + 0.25 * Math.sin(this.animTime * 5);
+      ctx.save();
+      ctx.shadowColor = '#FF3B6B';
+      ctx.shadowBlur = 10;
+      ctx.fillStyle = `rgba(255, 59, 107, ${pulse.toFixed(2)})`;
+      ctx.fillRect(h.x, h.y + 4, h.w, 5);
 
-      ctx.fillStyle = '#FF6B8B';
+      ctx.fillStyle = '#FF8FA3';
       for (let sx = h.x + 2; sx < h.x + h.w - 6; sx += 12) {
-        const waveY = Math.round(Math.sin(this.animTime * 4 + sx * 0.12) * 1.5);
-        ctx.fillRect(sx, h.y + 2 + waveY, 6, 3);
-        ctx.fillRect(sx + 2, h.y + waveY, 2, 2);
+        const waveY = Math.round(Math.sin(this.animTime * 4.5 + sx * 0.14) * 1.5);
+        ctx.fillRect(sx, h.y + 1 + waveY, 6, 3);
+        ctx.fillRect(sx + 2, h.y - 1 + waveY, 2, 2);
       }
+      ctx.restore();
     }
   }
 
@@ -363,18 +597,18 @@ export class GameRenderer {
       const state = world.bridges[i];
       const active = Boolean(state?.active);
       const locked = Boolean(state?.locked);
-      const color = locked ? THEME_COLORS.secondaryAccent : THEME_COLORS.primaryAccent;
+      const color = locked ? '#4FF0D6' : '#B49BFF';
 
-      ctx.fillStyle = THEME_COLORS.surface;
+      ctx.fillStyle = '#36415E';
       ctx.fillRect(def.x - 4, def.y - 2, 6, def.h + 4);
       ctx.fillRect(def.x + def.w - 2, def.y - 2, 6, def.h + 4);
-      ctx.fillStyle = active ? color : '#3C425B';
+      ctx.fillStyle = active ? color : '#526085';
       ctx.fillRect(def.x - 2, def.y + 3, 2, def.h - 6);
       ctx.fillRect(def.x + def.w, def.y + 3, 2, def.h - 6);
 
       if (!active) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(139, 114, 255, 0.28)';
+        ctx.strokeStyle = 'rgba(180, 155, 255, 0.42)';
         ctx.setLineDash([6, 6]);
         ctx.lineWidth = 1.5;
         ctx.strokeRect(def.x + 1, def.y + 1, def.w - 2, def.h - 2);
@@ -384,24 +618,23 @@ export class GameRenderer {
 
       ctx.save();
       ctx.shadowColor = color;
-      ctx.shadowBlur = 10;
-      ctx.fillStyle = locked ? 'rgba(84, 214, 197, 0.24)' : 'rgba(139, 114, 255, 0.24)';
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = locked ? 'rgba(79, 240, 214, 0.34)' : 'rgba(180, 155, 255, 0.34)';
       ctx.fillRect(def.x, def.y, def.w, def.h);
 
       ctx.fillStyle = color;
-      ctx.fillRect(def.x, def.y, def.w, 3);
+      ctx.fillRect(def.x, def.y, def.w, 4);
       ctx.fillRect(def.x, def.y + def.h - 2, def.w, 2);
 
-      // Timed bridge draining indicator bar
       if (state && state.maxTicks > 0 && !locked) {
         const ratio = Math.max(0, Math.min(1, state.remainingTicks / state.maxTicks));
-        ctx.fillStyle = ratio < 0.25 ? THEME_COLORS.warning : THEME_COLORS.secondaryAccent;
-        ctx.fillRect(def.x + 2, def.y + 5, Math.round((def.w - 4) * ratio), 4);
+        ctx.fillStyle = ratio < 0.25 ? '#FF6B8B' : '#FFD166';
+        ctx.fillRect(def.x + 2, def.y + 5, Math.round((def.w - 4) * ratio), 5);
       } else {
         const shimmerOffset = Math.floor(this.animTime * 48) % 16;
-        ctx.fillStyle = 'rgba(230, 234, 242, 0.25)';
+        ctx.fillStyle = 'rgba(235, 242, 255, 0.4)';
         for (let bx = def.x + shimmerOffset; bx < def.x + def.w - 4; bx += 16) {
-          ctx.fillRect(bx, def.y + 5, 6, 5);
+          ctx.fillRect(bx, def.y + 6, 6, 4);
         }
       }
       ctx.restore();
@@ -418,11 +651,10 @@ export class GameRenderer {
       const def = level.movingPlatforms[i]!;
       const mp = world.movingPlatforms[i]!;
       const accent =
-        def.accent === 'mint' ? THEME_COLORS.secondaryAccent : THEME_COLORS.primaryAccent;
+        def.accent === 'sky' ? '#38BDF8' : def.accent === 'mint' ? '#4FF0D6' : '#B49BFF';
 
-      // Guide track rail between start and end centers
       ctx.save();
-      ctx.strokeStyle = mp.active ? 'rgba(139, 114, 255, 0.26)' : 'rgba(147, 155, 178, 0.14)';
+      ctx.strokeStyle = mp.active ? `${accent}55` : 'rgba(147, 155, 178, 0.22)';
       ctx.setLineDash([4, 4]);
       ctx.lineWidth = 1.5;
       ctx.beginPath();
@@ -434,18 +666,15 @@ export class GameRenderer {
       const x = Math.round(mp.x);
       const y = Math.round(mp.y);
 
-      // Platform chassis
-      ctx.fillStyle = '#24293B';
+      ctx.fillStyle = '#2B3654';
       ctx.fillRect(x, y, mp.w, mp.h);
-      ctx.strokeStyle = highContrast ? THEME_COLORS.textPrimary : mp.active ? accent : '#4A5270';
-      ctx.lineWidth = highContrast ? 1.5 : 1;
+      ctx.strokeStyle = highContrast ? '#E6EAF2' : mp.active ? accent : '#647499';
+      ctx.lineWidth = highContrast ? 2 : 1.5;
       ctx.strokeRect(x + 0.5, y + 0.5, mp.w - 1, mp.h - 1);
 
-      // Glowing top grip strip
-      ctx.fillStyle = mp.active ? accent : '#4A5270';
-      ctx.fillRect(x + 2, y + 1, mp.w - 4, 3);
+      ctx.fillStyle = mp.active ? accent : '#647499';
+      ctx.fillRect(x + 1, y + 1, mp.w - 2, 4);
 
-      // Subtle thruster pips underneath when active
       if (mp.active) {
         const flicker = 2 + Math.round(Math.abs(Math.sin(this.animTime * 16)) * 2);
         ctx.fillStyle = accent;
@@ -464,11 +693,10 @@ export class GameRenderer {
       const def = level.lockedGates[i]!;
       const gate = world.lockedGates[i];
       const accent =
-        def.accent === 'mint' ? THEME_COLORS.secondaryAccent : THEME_COLORS.primaryAccent;
+        def.accent === 'amber' ? '#FFB84D' : def.accent === 'mint' ? '#4FF0D6' : '#B49BFF';
 
       if (gate?.unlocked) {
-        // Retracted emitter caps
-        ctx.fillStyle = '#2A3044';
+        ctx.fillStyle = '#333F5E';
         ctx.fillRect(def.x, def.y, def.w, 6);
         ctx.fillRect(def.x, def.y + def.h - 6, def.w, 6);
         ctx.fillStyle = accent;
@@ -476,23 +704,21 @@ export class GameRenderer {
         continue;
       }
 
-      // Locked vertical neon barrier
       ctx.save();
-      ctx.fillStyle = '#1B1E29';
+      ctx.fillStyle = '#232B42';
       ctx.fillRect(def.x, def.y, def.w, def.h);
       ctx.shadowColor = accent;
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = 12;
       ctx.fillStyle = accent;
-      ctx.fillRect(def.x + 5, def.y + 4, def.w - 10, def.h - 8);
+      ctx.fillRect(def.x + 4, def.y + 4, def.w - 8, def.h - 8);
       ctx.restore();
 
-      // Center keyhole emblem
       const cy = def.y + def.h / 2;
-      ctx.fillStyle = '#101116';
-      ctx.fillRect(def.x + 2, cy - 8, def.w - 4, 16);
-      ctx.fillStyle = THEME_COLORS.gold;
-      ctx.fillRect(def.x + 6, cy - 5, 4, 4);
-      ctx.fillRect(def.x + 7, cy - 1, 2, 5);
+      ctx.fillStyle = '#0D101B';
+      ctx.fillRect(def.x + 1, cy - 9, def.w - 2, 18);
+      ctx.fillStyle = '#FFD166';
+      ctx.fillRect(def.x + 5, cy - 5, 6, 4);
+      ctx.fillRect(def.x + 7, cy - 1, 2, 6);
     }
   }
 
@@ -507,24 +733,25 @@ export class GameRenderer {
       const c = world.crates[i]!;
       const x = Math.round(c.x);
       const y = Math.round(c.y);
-      const accent =
-        def.accent === 'mint' ? THEME_COLORS.secondaryAccent : THEME_COLORS.primaryAccent;
+      const isHeavy = def.accent === 'violet';
+      const accent = isHeavy ? '#C084FC' : '#F5A623';
+      const bodyFill = isHeavy ? '#3B2854' : '#4A361C';
+      const braceFill = isHeavy ? '#281B3B' : '#332412';
       const effectiveReq = world.soloPractice ? 1 : c.requiredPushers;
       const isBeingPushedEnough = c.activePushers >= effectiveReq;
 
       ctx.save();
       if (isBeingPushedEnough) {
         ctx.shadowColor = accent;
-        ctx.shadowBlur = 10;
+        ctx.shadowBlur = 12;
       }
 
-      // Dark metallic crate body
-      ctx.fillStyle = '#252A3C';
+      // High-contrast crate body clearly distinct from blue-slate walls!
+      ctx.fillStyle = bodyFill;
       ctx.fillRect(x, y, c.w, c.h);
 
-      // Diagonal industrial brace
-      ctx.strokeStyle = '#191D2B';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = braceFill;
+      ctx.lineWidth = 2.5;
       ctx.beginPath();
       ctx.moveTo(x + 4, y + 4);
       ctx.lineTo(x + c.w - 4, y + c.h - 4);
@@ -532,35 +759,29 @@ export class GameRenderer {
       ctx.lineTo(x + 4, y + c.h - 4);
       ctx.stroke();
 
-      // Rim highlight & corner rivets
-      ctx.strokeStyle = highContrast
-        ? THEME_COLORS.textPrimary
-        : isBeingPushedEnough
-          ? accent
-          : 'rgba(230, 234, 242, 0.24)';
-      ctx.lineWidth = highContrast ? 2 : 1.5;
-      ctx.strokeRect(x + 0.5, y + 0.5, c.w - 1, c.h - 1);
+      // Bright perimeter frame + corner bolts
+      ctx.strokeStyle = highContrast ? '#E6EAF2' : accent;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 1, y + 1, c.w - 2, c.h - 2);
 
-      ctx.fillStyle = accent;
-      ctx.fillRect(x + 2, y + 2, 3, 3);
-      ctx.fillRect(x + c.w - 5, y + 2, 3, 3);
-      ctx.fillRect(x + 2, y + c.h - 5, 3, 3);
-      ctx.fillRect(x + c.w - 5, y + c.h - 5, 3, 3);
+      ctx.fillStyle = '#E6EAF2';
+      ctx.fillRect(x + 3, y + 3, 2, 2);
+      ctx.fillRect(x + c.w - 5, y + 3, 2, 2);
+      ctx.fillRect(x + 3, y + c.h - 5, 2, 2);
+      ctx.fillRect(x + c.w - 5, y + c.h - 5, 2, 2);
 
-      // Clear weight badge stamp ("x1" or "x2")
       ctx.shadowBlur = 0;
-      ctx.fillStyle = 'rgba(16, 17, 22, 0.8)';
-      ctx.fillRect(x + 5, y + c.h / 2 - 6, c.w - 10, 12);
-      ctx.fillStyle = isBeingPushedEnough ? accent : THEME_COLORS.textPrimary;
+      ctx.fillStyle = 'rgba(11, 13, 22, 0.88)';
+      ctx.fillRect(x + 4, y + c.h / 2 - 6, c.w - 8, 12);
+      ctx.fillStyle = isBeingPushedEnough ? '#4FF0D6' : accent;
       ctx.font = '800 9px monospace';
       ctx.textAlign = 'center';
       ctx.fillText(`x${effectiveReq}`, x + c.w / 2, y + c.h / 2 + 3);
 
-      // Show "1/2" hint above heavy crate when one teammate is pushing alone
       if (effectiveReq === 2 && c.activePushers === 1) {
-        ctx.fillStyle = THEME_COLORS.warning;
-        ctx.font = '700 8px monospace';
-        ctx.fillText('1/2 PUSH', x + c.w / 2, y - 4);
+        ctx.fillStyle = '#FFD166';
+        ctx.font = '800 8px monospace';
+        ctx.fillText('1/2 PUSH', x + c.w / 2, y - 5);
       }
       ctx.restore();
     }
@@ -573,7 +794,6 @@ export class GameRenderer {
   ): void {
     const playerById = new Map(world.players.map((p) => [p.id, p]));
     for (let i = 0; i < level.keys.length; i += 1) {
-      const def = level.keys[i]!;
       const key = world.keys[i]!;
       if (key.used) continue;
 
@@ -581,11 +801,10 @@ export class GameRenderer {
       const kx = Math.round(key.x);
       const ky = Math.round(key.y + bob);
 
-      // Tether line to carrier
       if (key.carrierPlayerId) {
         const carrier = playerById.get(key.carrierPlayerId);
         if (carrier) {
-          ctx.strokeStyle = 'rgba(255, 224, 102, 0.35)';
+          ctx.strokeStyle = 'rgba(255, 209, 102, 0.55)';
           ctx.lineWidth = 1.5;
           ctx.beginPath();
           ctx.moveTo(kx, ky);
@@ -595,18 +814,21 @@ export class GameRenderer {
       }
 
       ctx.save();
-      ctx.shadowColor = THEME_COLORS.gold;
-      ctx.shadowBlur = 10;
-      ctx.fillStyle = THEME_COLORS.gold;
-      // Pixel key bow (ring)
+      ctx.shadowColor = '#FFD166';
+      ctx.shadowBlur = 12;
+      // Dark outline for instant readability
+      ctx.fillStyle = '#0B0D16';
+      ctx.fillRect(kx - 7, ky - 5, 9, 9);
+      ctx.fillRect(kx + 1, ky - 2, 10, 4);
+      // Radiant Gold key
+      ctx.fillStyle = '#FFD166';
       ctx.fillRect(kx - 6, ky - 4, 7, 7);
-      ctx.fillStyle = THEME_COLORS.background;
+      ctx.fillStyle = '#0B0D16';
       ctx.fillRect(kx - 4, ky - 2, 3, 3);
-      // Key shaft & teeth
-      ctx.fillStyle = THEME_COLORS.gold;
-      ctx.fillRect(kx + 1, ky - 1, 8, 2);
+      ctx.fillStyle = '#FFD166';
+      ctx.fillRect(kx + 1, ky - 1, 9, 2);
       ctx.fillRect(kx + 5, ky + 1, 2, 3);
-      ctx.fillRect(kx + 8, ky + 1, 2, 2);
+      ctx.fillRect(kx + 8, ky + 1, 2, 3);
       ctx.restore();
     }
   }
@@ -624,27 +846,27 @@ export class GameRenderer {
       );
       const depressed = Boolean(state?.pressed || state?.latched);
       const accent =
-        def.accent === 'mint' ? THEME_COLORS.secondaryAccent : THEME_COLORS.primaryAccent;
+        def.accent === 'mint' ? '#4FF0D6' : def.accent === 'amber' ? '#FFB84D' : '#B49BFF';
 
-      ctx.fillStyle = '#2A3044';
-      ctx.fillRect(def.x - 2, def.y + def.h - 3, def.w + 4, 3);
+      ctx.fillStyle = '#181E30';
+      ctx.fillRect(def.x - 2, def.y + def.h - 3, def.w + 4, 4);
 
       const plateY = depressed ? def.y + 3 : def.y;
-      const plateH = depressed ? def.h - 3 : def.h - 1;
+      const plateH = depressed ? def.h - 3 : def.h;
 
       ctx.save();
       if (active) {
         ctx.shadowColor = accent;
-        ctx.shadowBlur = 10;
+        ctx.shadowBlur = 12;
       }
-      ctx.fillStyle = active ? accent : '#4A5270';
+      ctx.fillStyle = active ? accent : '#647299';
       ctx.fillRect(def.x, plateY, def.w, plateH);
-      ctx.fillStyle = active ? '#E6EAF2' : '#717B9E';
+      ctx.fillStyle = '#E6EAF2';
       ctx.fillRect(def.x + 2, plateY, def.w - 4, 1);
       ctx.restore();
 
-      ctx.fillStyle = active ? accent : 'rgba(147, 155, 178, 0.65)';
-      ctx.font = '700 8px monospace';
+      ctx.fillStyle = active ? accent : '#C4CEE6';
+      ctx.font = '800 8px monospace';
       ctx.textAlign = 'center';
       const label =
         state?.latched
@@ -664,45 +886,45 @@ export class GameRenderer {
     const door = level.exitDoor;
     const { unlocked, chargeTicks, chargeRequired, playersInside, playersRequired } = world.exitDoor;
 
-    ctx.fillStyle = THEME_COLORS.surface;
+    ctx.fillStyle = '#333F5E';
     ctx.fillRect(door.x - 4, door.y - 6, door.w + 8, door.h + 6);
-    ctx.strokeStyle = unlocked ? THEME_COLORS.secondaryAccent : '#3D445E';
+    ctx.strokeStyle = unlocked ? '#4FF0D6' : '#647499';
     ctx.lineWidth = 2;
     ctx.strokeRect(door.x - 3, door.y - 5, door.w + 6, door.h + 4);
 
     if (unlocked) {
       ctx.save();
-      const pulse = 0.25 + 0.12 * Math.sin(this.animTime * 4);
-      ctx.fillStyle = `rgba(84, 214, 197, ${pulse.toFixed(2)})`;
+      const pulse = 0.34 + 0.14 * Math.sin(this.animTime * 4);
+      ctx.fillStyle = `rgba(79, 240, 214, ${pulse.toFixed(2)})`;
       ctx.fillRect(door.x, door.y, door.w, door.h);
 
-      ctx.shadowColor = THEME_COLORS.secondaryAccent;
-      ctx.shadowBlur = 14;
-      ctx.strokeStyle = THEME_COLORS.secondaryAccent;
-      ctx.lineWidth = 2;
+      ctx.shadowColor = '#4FF0D6';
+      ctx.shadowBlur = 16;
+      ctx.strokeStyle = '#4FF0D6';
+      ctx.lineWidth = 2.5;
       ctx.strokeRect(door.x + 3, door.y + 3, door.w - 6, door.h - 4);
       ctx.restore();
 
-      ctx.fillStyle = THEME_COLORS.textPrimary;
-      ctx.font = '800 11px monospace';
+      ctx.fillStyle = '#E6EAF2';
+      ctx.font = '900 11px monospace';
       ctx.textAlign = 'center';
       ctx.fillText(`${playersInside}/${playersRequired}`, door.x + door.w / 2, door.y - 11);
     } else {
-      ctx.fillStyle = '#151822';
+      ctx.fillStyle = '#181F33';
       ctx.fillRect(door.x, door.y, door.w, door.h);
-      ctx.fillStyle = '#2C3247';
+      ctx.fillStyle = '#46547A';
       ctx.fillRect(door.x + door.w / 2 - 1, door.y, 2, door.h);
 
       const ratio = chargeTicks / Math.max(1, chargeRequired);
-      ctx.fillStyle = '#101116';
+      ctx.fillStyle = '#0B0D16';
       ctx.fillRect(door.x + 4, door.y + 20, door.w - 8, 6);
       if (ratio > 0) {
-        ctx.fillStyle = THEME_COLORS.secondaryAccent;
+        ctx.fillStyle = '#4FF0D6';
         ctx.fillRect(door.x + 4, door.y + 20, Math.round((door.w - 8) * ratio), 6);
       }
 
-      ctx.fillStyle = THEME_COLORS.textMuted;
-      ctx.font = '700 8px monospace';
+      ctx.fillStyle = '#C4CEE6';
+      ctx.font = '800 8px monospace';
       ctx.textAlign = 'center';
       ctx.fillText('LOCKED', door.x + door.w / 2, door.y - 11);
     }
@@ -714,7 +936,7 @@ export class GameRenderer {
     cx: number,
     cy: number,
   ): void {
-    ctx.fillStyle = '#101116';
+    ctx.fillStyle = '#0B0D16';
     switch (shape) {
       case 'square':
         ctx.fillRect(cx - 2, cy - 2, 4, 4);
@@ -745,7 +967,7 @@ export class GameRenderer {
         ctx.fillRect(cx - 2, cy - 0.5, 4, 1.5);
         break;
       case 'ring':
-        ctx.strokeStyle = '#101116';
+        ctx.strokeStyle = '#0B0D16';
         ctx.lineWidth = 1.2;
         ctx.strokeRect(cx - 2, cy - 2, 4, 4);
         break;
@@ -778,7 +1000,7 @@ export class GameRenderer {
     ctx.globalAlpha = alpha;
 
     if (pose.grounded) {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
       ctx.fillRect(px + 2, py + h - 1, w - 4, 2);
     }
 
@@ -786,12 +1008,18 @@ export class GameRenderer {
     const bodyY = py - stretchY;
     const bodyH = h - 4 + stretchY;
 
+    // Crisp 1px dark outer silhouette outline so every character POPS against any surface!
+    ctx.fillStyle = '#090B12';
+    ctx.fillRect(px - 1, bodyY, w + 2, bodyH);
+    ctx.fillRect(px + 1, py + h - 4, 7, 5);
+    ctx.fillRect(px + w - 8, py + h - 4, 7, 5);
+
     if (opts.isControlled) {
       ctx.shadowColor = player.color;
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = 11;
     }
 
-    // Main pixel-art torso
+    // Vivid player torso
     ctx.fillStyle = player.color;
     ctx.fillRect(px + 1, bodyY + 1, w - 2, bodyH - 2);
     ctx.fillRect(px, bodyY + 3, w, bodyH - 6);
@@ -799,13 +1027,13 @@ export class GameRenderer {
     ctx.shadowBlur = 0;
 
     if (opts.highContrast) {
-      ctx.strokeStyle = THEME_COLORS.textPrimary;
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#E6EAF2';
+      ctx.lineWidth = 1.2;
       ctx.strokeRect(px + 0.5, bodyY + 1.5, w - 1, bodyH - 3);
     }
 
-    // Flat stackable crown cap
-    ctx.fillStyle = 'rgba(230, 234, 242, 0.44)';
+    // Luminous flat stackable crown cap
+    ctx.fillStyle = 'rgba(235, 242, 255, 0.62)';
     ctx.fillRect(px + 2, bodyY + 1, w - 4, 2);
 
     // Animated legs
@@ -815,16 +1043,15 @@ export class GameRenderer {
     ctx.fillRect(px + 2, py + h - 4 + Math.min(0, stride), 5, 4);
     ctx.fillRect(px + w - 7, py + h - 4 + Math.min(0, -stride), 5, 4);
 
-    // Dark pixel visor & directional glowing eyes
+    // Dark pixel visor & bright eyes
     const eyeShift = pose.facing > 0 ? 1 : -1;
-    ctx.fillStyle = '#101116';
+    ctx.fillStyle = '#0B0D16';
     ctx.fillRect(px + 3 + eyeShift, bodyY + 6, w - 6, 5);
 
-    ctx.fillStyle = player.atExit ? THEME_COLORS.secondaryAccent : THEME_COLORS.textPrimary;
+    ctx.fillStyle = player.atExit ? '#4FF0D6' : '#F0F4FF';
     ctx.fillRect(px + 5 + eyeShift, bodyY + 7, 2, 3);
     ctx.fillRect(px + 11 + eyeShift, bodyY + 7, 2, 3);
 
-    // Accessibility: distinct geometric shape emblem on chest when Colorblind Shapes enabled
     if (opts.colorblindShapes) {
       const slotInfo = getPaletteForSlot(player.slot);
       this.drawShapeEmblem(ctx, slotInfo.shape, px + Math.round(w / 2), bodyY + 14);
@@ -833,37 +1060,36 @@ export class GameRenderer {
     const label = player.isSoloPuppet
       ? `${player.badge} · SOLO`
       : `${player.badge} · ${player.displayName.slice(0, 10)}`;
-    ctx.font = '700 9px monospace';
+    ctx.font = '800 9px monospace';
     ctx.textAlign = 'center';
     const centerX = px + w / 2;
 
     if (opts.isControlled) {
       const bob = Math.round(Math.sin(this.animTime * 7) * 1.5);
-      ctx.fillStyle = opts.soloPractice ? THEME_COLORS.secondaryAccent : player.color;
+      ctx.fillStyle = opts.soloPractice ? '#4FF0D6' : player.color;
       ctx.fillRect(centerX - 3, py - (opts.showNames ? 18 : 10) + bob, 6, 2);
       ctx.fillRect(centerX - 1, py - (opts.showNames ? 16 : 8) + bob, 2, 2);
     }
 
     if (opts.showNames) {
-      ctx.fillStyle = 'rgba(16, 17, 22, 0.74)';
+      ctx.fillStyle = 'rgba(9, 11, 18, 0.84)';
       const textWidth = ctx.measureText(label).width;
       ctx.fillRect(centerX - textWidth / 2 - 3, py - 12, textWidth + 6, 10);
 
-      ctx.fillStyle = opts.isControlled ? THEME_COLORS.textPrimary : THEME_COLORS.textMuted;
+      ctx.fillStyle = opts.isControlled ? '#E6EAF2' : '#BAC4DE';
       ctx.fillText(label, centerX, py - 4);
     }
 
-    // Live co-op Emote Speech Bubble
     if (opts.emoteText) {
       const bubbleY = py - (opts.showNames ? 32 : 24);
       ctx.font = '800 9px monospace';
       const bw = ctx.measureText(opts.emoteText).width + 10;
-      ctx.fillStyle = THEME_COLORS.panel;
+      ctx.fillStyle = '#1B1E29';
       ctx.strokeStyle = player.color;
       ctx.lineWidth = 1.5;
       ctx.fillRect(centerX - bw / 2, bubbleY - 10, bw, 13);
       ctx.strokeRect(centerX - bw / 2 + 0.5, bubbleY - 9.5, bw - 1, 12);
-      ctx.fillStyle = THEME_COLORS.textPrimary;
+      ctx.fillStyle = '#E6EAF2';
       ctx.fillText(opts.emoteText, centerX, bubbleY);
     }
 

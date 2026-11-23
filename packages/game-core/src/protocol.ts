@@ -72,6 +72,9 @@ export const SimEventSchema = z.object({
   type: z.enum([
     'jump',
     'land',
+    'bounce',
+    'crumble',
+    'checkpoint',
     'switch_on',
     'bridge_on',
     'bridge_lock',
@@ -124,6 +127,7 @@ export const GameWorldStateSchema = z.object({
   completionTimeMs: z.number().int().nullable(),
   medal: MedalTierSchema.nullable(),
   respawnCount: z.number().int().nonnegative(),
+  activeCheckpointId: z.string().nullable(),
   players: z.array(SimPlayerStateSchema),
   switches: z.array(
     z.object({
@@ -153,6 +157,19 @@ export const GameWorldStateSchema = z.object({
       w: z.number(),
       h: z.number(),
       progress: z.number(),
+      active: z.boolean(),
+    }),
+  ),
+  crumblePlatforms: z.array(
+    z.object({
+      id: z.string(),
+      state: z.enum(['solid', 'shaking', 'gone']),
+      timerTicks: z.number().int().nonnegative(),
+    }),
+  ),
+  lasers: z.array(
+    z.object({
+      id: z.string(),
       active: z.boolean(),
     }),
   ),

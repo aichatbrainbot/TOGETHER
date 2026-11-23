@@ -5,9 +5,11 @@ export interface GameSettings {
   colorblindShapes: boolean;
   highContrast: boolean;
   reducedMotion: boolean;
+  fillViewport: boolean;
+  cinemaMode: boolean;
 }
 
-const STORAGE_KEY = 'together_settings_v2';
+const STORAGE_KEY = 'together_settings_v3';
 
 export const DEFAULT_SETTINGS: GameSettings = {
   soundEnabled: true,
@@ -16,11 +18,16 @@ export const DEFAULT_SETTINGS: GameSettings = {
   colorblindShapes: false,
   highContrast: false,
   reducedMotion: false,
+  fillViewport: true,
+  cinemaMode: false,
 };
 
 export function loadGameSettings(): GameSettings {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem('together_settings_v1');
+    const raw =
+      localStorage.getItem(STORAGE_KEY) ??
+      localStorage.getItem('together_settings_v2') ??
+      localStorage.getItem('together_settings_v1');
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<GameSettings>;
     return {
@@ -46,6 +53,12 @@ export function loadGameSettings(): GameSettings {
         typeof parsed.reducedMotion === 'boolean'
           ? parsed.reducedMotion
           : DEFAULT_SETTINGS.reducedMotion,
+      fillViewport:
+        typeof parsed.fillViewport === 'boolean'
+          ? parsed.fillViewport
+          : DEFAULT_SETTINGS.fillViewport,
+      cinemaMode:
+        typeof parsed.cinemaMode === 'boolean' ? parsed.cinemaMode : DEFAULT_SETTINGS.cinemaMode,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
