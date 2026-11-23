@@ -625,23 +625,24 @@ export class ActivityRoomManager {
     );
     room.inputs.clear();
     room.pendingEvents = [];
-    room.lastStepTimeMs = Date.now();
+    room.lastStepTimeMs = performance.now();
     room.accumulatorMs = 0;
   }
 
   private startSimulationLoop(room: ManagedRoom): void {
     this.stopSimulationLoop(room);
-    room.lastStepTimeMs = Date.now();
+    room.lastStepTimeMs = performance.now();
     room.accumulatorMs = 0;
 
     const stepMs = 1000 / PHYSICS.TICK_RATE;
+    // 8ms polling cadence eliminates Windows 15.6ms setInterval double-tick aliasing
     room.simTimer = setInterval(() => {
       if (!room.world || !room.activeLevel || room.phase !== 'playing') {
         this.stopSimulationLoop(room);
         return;
       }
 
-      const now = Date.now();
+      const now = performance.now();
       const delta = Math.min(100, Math.max(0, now - room.lastStepTimeMs));
       room.lastStepTimeMs = now;
       room.accumulatorMs += delta;
@@ -685,7 +686,7 @@ export class ActivityRoomManager {
         this.recordCompletedRun(room);
         this.stopSimulationLoop(room);
       }
-    }, 16);
+    }, 8);
   }
 
   private recordCompletedRun(room: ManagedRoom): void {

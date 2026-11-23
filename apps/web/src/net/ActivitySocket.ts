@@ -74,6 +74,19 @@ export class ActivitySocketClient {
         return;
       }
 
+      // Fast hot-path for 30 Hz authoritative snapshots (avoids heavy Zod allocation 30x/sec on UI thread)
+      if (
+        raw &&
+        typeof raw === 'object' &&
+        (raw as { type?: unknown }).type === 'game_snapshot'
+      ) {
+        const snap = raw as { world?: GameWorldState; events?: SimEvent[] };
+        if (snap.world && Array.isArray(snap.world.players)) {
+          this.callbacks.onGameSnapshot(snap.world, Array.isArray(snap.events) ? snap.events : []);
+        }
+        return;
+      }
+
       const msg = parseS2CMessage(raw);
       if (!msg) return;
 

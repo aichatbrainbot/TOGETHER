@@ -1,8 +1,11 @@
 import {
+  type CrateRuntimeState,
   EMOTE_PINGS,
   type EmotePingId,
   type GameWorldState,
   INPUT_BITS,
+  type KeyRuntimeState,
+  type MovingPlatformRuntimeState,
   PHYSICS,
   type SimEvent,
   type SimPlayerState,
@@ -24,10 +27,18 @@ import {
   SoundOnIcon,
 } from './Icons.js';
 
+export type SnapshotListener = (world: GameWorldState, events: readonly SimEvent[]) => void;
+
+export interface SnapshotBus {
+  subscribe: (listener: SnapshotListener) => () => void;
+  getLatest: () => GameWorldState | null;
+}
+
 interface GameStageProps {
+  /** Discrete UI state snapshot (updates ONLY on level/status/respawn/player-count changes, never 30x/sec) */
   world: GameWorldState;
-  events: readonly SimEvent[];
-  eventBatchId: number;
+  /** High-frequency 30 Hz authoritative snapshot bus bypassing React reconciliation completely */
+  snapshotBus: SnapshotBus;
   emotesByPlayerId: ReadonlyMap<string, ActiveEmote>;
   emoteSeq: number;
   localUserId: string;
@@ -55,8 +66,7 @@ function formatTimer(ms: number): string {
 
 export function GameStage({
   world,
-  events,
-  eventBatchId,
+  snapshotBus,
   emotesByPlayerId,
   emoteSeq,
   localUserId,
@@ -75,6 +85,8 @@ export function GameStage({
 }: GameStageProps) {
   const stageRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const timerCodeRef = useRef<HTMLElement | null>(null);
+  const parCodeRef = useRef<HTMLElement | null>(null);
   const rendererRef = useRef<GameRenderer | null>(null);
   const soundRef = useRef<SoundEngine | null>(null);
 
@@ -85,23 +97,30 @@ export function GameStage({
     [world.levelId, world.proceduralSeed],
   );
 
-  const latestWorldRef = useRef<GameWorldState>(world);
-  const predictedWorldRef = useRef<GameWorldState>(cloneGameWorld(world));
+  const initialLatest = snapshotBus.getLatest() ?? world;
+  const latestWorldRef = useRef<GameWorldState>(initialLatest);
+  const predictedWorldRef = useRef<GameWorldState>(cloneGameWorld(initialLatest));
   const predAccumRef = useRef<number>(0);
   const visualErrRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const inputHistoryRef = useRef<Array<{ seq: number; buttons: number }>>([]);
+  const sendStrideRef = useRef<number>(0);
+  const smoothPlatformsRef = useRef<MovingPlatformRuntimeState[]>([]);
+  const smoothCratesRef = useRef<CrateRuntimeState[]>([]);
+  const smoothKeysRef = useRef<KeyRuntimeState[]>([]);
   const prevSnapMetaRef = useRef<{
     levelId: string;
     respawnCount: number;
     controlledId: string;
   }>({
-    levelId: world.levelId,
-    respawnCount: world.respawnCount,
-    controlledId: world.soloPractice ? (world.soloActiveId ?? localUserId) : localUserId,
+    levelId: initialLatest.levelId,
+    respawnCount: initialLatest.respawnCount,
+    controlledId: initialLatest.soloPractice
+      ? (initialLatest.soloActiveId ?? localUserId)
+      : localUserId,
   });
 
   const activeLevelRef = useRef(activeLevel);
   const settingsRef = useRef<GameSettings>(settings);
-  const pingMsRef = useRef<number | null>(pingMs);
   const emotesRef = useRef<ReadonlyMap<string, ActiveEmote>>(emotesByPlayerId);
   const viewportRef = useRef<{ w: number; h: number }>({
     w: activeLevel.width,
@@ -114,7 +133,6 @@ export function GameStage({
   const prevGamepadSwapRef = useRef<boolean>(false);
   const lastSentBitsRef = useRef<number>(-1);
   const seqRef = useRef<number>(1);
-  const lastEventBatchRef = useRef<number>(-1);
   const lastEmoteSeqRef = useRef<number>(0);
 
   if (!rendererRef.current) rendererRef.current = new GameRenderer();
@@ -122,7 +140,6 @@ export function GameStage({
 
   activeLevelRef.current = activeLevel;
   settingsRef.current = settings;
-  pingMsRef.current = pingMs;
   emotesRef.current = emotesByPlayerId;
 
   // Lock Discord mobile orientation to landscape during active gameplay
@@ -154,84 +171,128 @@ export function GameStage({
     return bits;
   }, []);
 
-  // Reconcile authoritative 30 Hz server snapshot with local 60 Hz client prediction
-  useEffect(() => {
-    latestWorldRef.current = world;
-
-    const controlledId = world.soloPractice ? (world.soloActiveId ?? localUserId) : localUserId;
-    const prevMeta = prevSnapMetaRef.current;
-    const hardReset =
-      prevMeta.levelId !== world.levelId ||
-      prevMeta.respawnCount !== world.respawnCount ||
-      prevMeta.controlledId !== controlledId ||
-      world.status !== 'playing';
-
-    prevSnapMetaRef.current = {
-      levelId: world.levelId,
-      respawnCount: world.respawnCount,
-      controlledId,
-    };
-
-    const poses = posesRef.current;
-    const oldControlledPose = poses.get(controlledId);
-
-    // Clone authoritative world and fast-forward by half-RTT ticks for responsive local feel
-    const reconciled = cloneGameWorld(world);
-    if (!hardReset && world.status === 'playing') {
-      const rtt = pingMsRef.current ?? 55;
-      const halfRttTicks = Math.min(4, Math.max(0, Math.round((rtt * 0.5) / (PHYSICS.DT * 1000))));
-      const curBits = computeButtons();
-      for (let t = 0; t < halfRttTicks; t += 1) {
-        stepGameWorld(reconciled, { [controlledId]: { buttons: curBits } }, activeLevelRef.current);
+  const flushInputImmediate = useCallback(
+    (force = false) => {
+      const bits = computeButtons();
+      if (force || bits !== lastSentBitsRef.current) {
+        lastSentBitsRef.current = bits;
+        seqRef.current += 1;
+        onSendInput(seqRef.current, bits);
       }
-    }
+    },
+    [computeButtons, onSendInput],
+  );
 
-    predictedWorldRef.current = reconciled;
-    predAccumRef.current = 0;
+  // Direct zero-React-overhead subscription to 30 Hz authoritative server snapshots
+  useEffect(() => {
+    const handleSnapshot = (nextWorld: GameWorldState, events: readonly SimEvent[]) => {
+      latestWorldRef.current = nextWorld;
+      const level = resolveLevel(nextWorld.levelId, nextWorld.proceduralSeed);
+      activeLevelRef.current = level;
 
-    const predControlled = reconciled.players.find((p) => p.id === controlledId);
-    if (hardReset || !oldControlledPose || !predControlled) {
-      visualErrRef.current = { x: 0, y: 0 };
-    } else {
-      const dx = oldControlledPose.x - predControlled.x;
-      const dy = oldControlledPose.y - predControlled.y;
-      if (Math.hypot(dx, dy) > 76) {
+      const controlledId = nextWorld.soloPractice
+        ? (nextWorld.soloActiveId ?? localUserId)
+        : localUserId;
+      const prevMeta = prevSnapMetaRef.current;
+      const hardReset =
+        prevMeta.levelId !== nextWorld.levelId ||
+        prevMeta.respawnCount !== nextWorld.respawnCount ||
+        prevMeta.controlledId !== controlledId ||
+        nextWorld.status !== 'playing';
+
+      prevSnapMetaRef.current = {
+        levelId: nextWorld.levelId,
+        respawnCount: nextWorld.respawnCount,
+        controlledId,
+      };
+
+      const poses = posesRef.current;
+      const oldControlledPose = poses.get(controlledId);
+      const authControlled = nextWorld.players.find((p) => p.id === controlledId);
+
+      // Prune all client inputs already acknowledged by server
+      if (hardReset) {
+        inputHistoryRef.current.length = 0;
+      } else if (authControlled) {
+        const ackSeq = authControlled.lastProcessedSeq;
+        let dropCount = 0;
+        while (
+          dropCount < inputHistoryRef.current.length &&
+          inputHistoryRef.current[dropCount]!.seq <= ackSeq
+        ) {
+          dropCount += 1;
+        }
+        if (dropCount > 0) {
+          inputHistoryRef.current.splice(0, dropCount);
+        }
+      }
+
+      // Replay ONLY exact historical unacknowledged inputs (zero wrong-button rubber-banding!)
+      const reconciled = cloneGameWorld(nextWorld);
+      if (!hardReset && nextWorld.status === 'playing' && inputHistoryRef.current.length > 0) {
+        const replayCount = Math.min(12, inputHistoryRef.current.length);
+        const startIdx = inputHistoryRef.current.length - replayCount;
+        for (let i = startIdx; i < inputHistoryRef.current.length; i += 1) {
+          const entry = inputHistoryRef.current[i]!;
+          stepGameWorld(
+            reconciled,
+            { [controlledId]: { buttons: entry.buttons, seq: entry.seq } },
+            level,
+          );
+        }
+      }
+
+      predictedWorldRef.current = reconciled;
+      predAccumRef.current = 0;
+
+      const predControlled = reconciled.players.find((p) => p.id === controlledId);
+      if (hardReset || !oldControlledPose || !predControlled) {
         visualErrRef.current = { x: 0, y: 0 };
       } else {
-        visualErrRef.current = { x: dx, y: dy };
+        const dx = oldControlledPose.x - predControlled.x;
+        const dy = oldControlledPose.y - predControlled.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 84 || dist < 0.75) {
+          visualErrRef.current = { x: 0, y: 0 };
+        } else {
+          visualErrRef.current = { x: dx, y: dy };
+        }
       }
-    }
 
-    const validIds = new Set<string>();
-    for (const p of world.players) {
-      validIds.add(p.id);
-      const existing = poses.get(p.id);
-      if (p.id === controlledId && predControlled) {
-        poses.set(p.id, {
-          x: predControlled.x + visualErrRef.current.x,
-          y: predControlled.y + visualErrRef.current.y,
-          vx: predControlled.vx,
-          vy: predControlled.vy,
-          facing: predControlled.facing,
-          grounded: predControlled.grounded,
-        });
-      } else if (!existing || hardReset || Math.hypot(existing.x - p.x, existing.y - p.y) > 96) {
-        poses.set(p.id, {
-          x: p.x,
-          y: p.y,
-          vx: p.vx,
-          vy: p.vy,
-          facing: p.facing,
-          grounded: p.grounded,
-        });
+      if (hardReset) {
+        smoothPlatformsRef.current = reconciled.movingPlatforms.map((m) => ({ ...m }));
+        smoothCratesRef.current = reconciled.crates.map((c) => ({ ...c }));
+        smoothKeysRef.current = reconciled.keys.map((k) => ({ ...k }));
       }
-    }
-    for (const id of poses.keys()) {
-      if (!validIds.has(id)) poses.delete(id);
-    }
 
-    if (eventBatchId !== lastEventBatchRef.current) {
-      lastEventBatchRef.current = eventBatchId;
+      const validIds = new Set<string>();
+      for (const p of nextWorld.players) {
+        validIds.add(p.id);
+        const existing = poses.get(p.id);
+        if (p.id === controlledId && predControlled) {
+          poses.set(p.id, {
+            x: predControlled.x + visualErrRef.current.x,
+            y: predControlled.y + visualErrRef.current.y,
+            vx: predControlled.vx,
+            vy: predControlled.vy,
+            facing: predControlled.facing,
+            grounded: predControlled.grounded,
+          });
+        } else if (!existing || hardReset || Math.hypot(existing.x - p.x, existing.y - p.y) > 96) {
+          poses.set(p.id, {
+            x: p.x,
+            y: p.y,
+            vx: p.vx,
+            vy: p.vy,
+            facing: p.facing,
+            grounded: p.grounded,
+          });
+        }
+      }
+      for (const id of poses.keys()) {
+        if (!validIds.has(id)) poses.delete(id);
+      }
+
       if (events.length > 0) {
         rendererRef.current?.spawnEventParticles(events);
         const playedTypes = new Set<SimEvent['type']>();
@@ -242,10 +303,18 @@ export function GameStage({
           }
         }
       }
-    }
-  }, [world, events, eventBatchId, localUserId, computeButtons]);
+    };
 
-  // True edge-to-edge full-screen canvas sizing (DPR-aware)
+    // Initialize smoothly with current snapshot on mount
+    const current = snapshotBus.getLatest();
+    if (current) {
+      handleSnapshot(current, []);
+    }
+
+    return snapshotBus.subscribe(handleSnapshot);
+  }, [snapshotBus, localUserId]);
+
+  // True edge-to-edge full-screen canvas sizing (capped DPR <= 1.5 + opaque alpha:false for 60 FPS inside Discord)
   useEffect(() => {
     const container = stageRef.current;
     const canvas = canvasRef.current;
@@ -253,13 +322,13 @@ export function GameStage({
 
     const updateCanvasSize = () => {
       const rect = container.getBoundingClientRect();
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
       const w = Math.max(320, Math.floor(rect.width));
       const h = Math.max(200, Math.floor(rect.height));
       viewportRef.current = { w, h };
       canvas.width = Math.floor(w * dpr);
       canvas.height = Math.floor(h * dpr);
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { alpha: false });
       if (ctx) {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       }
@@ -274,18 +343,6 @@ export function GameStage({
       window.removeEventListener('resize', updateCanvasSize);
     };
   }, []);
-
-  const flushInput = useCallback(
-    (force = false) => {
-      const bits = computeButtons();
-      if (force || bits !== lastSentBitsRef.current) {
-        lastSentBitsRef.current = bits;
-        seqRef.current += 1;
-        onSendInput(seqRef.current, bits);
-      }
-    },
-    [computeButtons, onSendInput],
-  );
 
   // Discord-safe Cinema Mode expansion (plus native fullscreen fallback ONLY outside Discord)
   const toggleCinemaExpand = useCallback(() => {
@@ -356,19 +413,19 @@ export function GameStage({
       }
 
       keysRef.current.add(e.code);
-      flushInput(false);
+      flushInputImmediate(false);
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
       keysRef.current.delete(e.code);
-      flushInput(false);
+      flushInputImmediate(false);
     };
 
     const onBlur = () => {
       keysRef.current.clear();
       touchBitsRef.current = 0;
       gamepadBitsRef.current = 0;
-      flushInput(true);
+      flushInputImmediate(true);
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -381,12 +438,14 @@ export function GameStage({
       window.removeEventListener('blur', onBlur);
       onSendInput(seqRef.current + 1, 0);
     };
-  }, [flushInput, onRestartLevel, onSendEmote, onSendInput, onSwapSolo, toggleCinemaExpand]);
+  }, [flushInputImmediate, onRestartLevel, onSendEmote, onSendInput, onSwapSolo, toggleCinemaExpand]);
 
-  // 60 FPS full-screen animation loop + local client-side prediction + Gamepad API polling
+  // Locked 60 FPS animation loop + tick-stamped client prediction + 60 FPS entity smoothing + direct DOM timer
   useEffect(() => {
     let rafId = 0;
     let lastTime = performance.now();
+    let lastHudText = '';
+    let lastParText = '';
 
     const pollGamepad = () => {
       if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
@@ -395,7 +454,7 @@ export function GameStage({
       if (!pad) {
         if (gamepadBitsRef.current !== 0) {
           gamepadBitsRef.current = 0;
-          flushInput(false);
+          flushInputImmediate(false);
         }
         return;
       }
@@ -418,7 +477,7 @@ export function GameStage({
 
       if (gBits !== gamepadBitsRef.current) {
         gamepadBitsRef.current = gBits;
-        flushInput(false);
+        flushInputImmediate(false);
       }
     };
 
@@ -429,30 +488,48 @@ export function GameStage({
       pollGamepad();
 
       const currentWorld = latestWorldRef.current;
+      const predWorld = predictedWorldRef.current;
+      const level = activeLevelRef.current;
       const controlledId = currentWorld.soloPractice
         ? (currentWorld.soloActiveId ?? localUserId)
         : localUserId;
 
-      // Advance deterministic local prediction for instant movement & jump response
-      const predWorld = predictedWorldRef.current;
+      // 1. Deterministic 60 Hz local prediction with tick-stamped input history
       if (predWorld && predWorld.status === 'playing' && currentWorld.status === 'playing') {
         predAccumRef.current = Math.min(predAccumRef.current + dtSec, PHYSICS.DT * 3);
         const curBits = computeButtons();
         while (predAccumRef.current >= PHYSICS.DT) {
           predAccumRef.current -= PHYSICS.DT;
-          stepGameWorld(predWorld, { [controlledId]: { buttons: curBits } }, activeLevelRef.current);
+          seqRef.current += 1;
+          const seq = seqRef.current;
+          inputHistoryRef.current.push({ seq, buttons: curBits });
+          if (inputHistoryRef.current.length > 48) {
+            inputHistoryRef.current.splice(0, inputHistoryRef.current.length - 48);
+          }
+
+          stepGameWorld(predWorld, { [controlledId]: { buttons: curBits, seq } }, level);
+
+          // Keep server lastProcessedSeq fresh while moving (30 Hz) without idle traffic
+          sendStrideRef.current += 1;
+          if (curBits !== lastSentBitsRef.current) {
+            lastSentBitsRef.current = curBits;
+            onSendInput(seq, curBits);
+          } else if (curBits !== 0 && sendStrideRef.current % 2 === 0) {
+            onSendInput(seq, curBits);
+          }
         }
       }
 
-      // Exponentially decay any micro-reconciliation offset so corrections stay silky smooth
-      const errDecay = Math.exp(-22 * dtSec);
+      // 2. Smoothly absorb any tiny reconciliation delta (no abrupt snaps!)
+      const errDecay = Math.exp(-18 * dtSec);
       visualErrRef.current.x *= errDecay;
       visualErrRef.current.y *= errDecay;
       if (Math.abs(visualErrRef.current.x) < 0.08) visualErrRef.current.x = 0;
       if (Math.abs(visualErrRef.current.y) < 0.08) visualErrRef.current.y = 0;
 
+      // 3. Smooth 60 FPS poses (local predicted + remote exponentially interpolated)
       const poses = posesRef.current;
-      const smoothFactor = 1 - Math.exp(-24 * dtSec);
+      const remoteSmooth = 1 - Math.exp(-22 * dtSec);
       const predControlled = predWorld?.players.find((p) => p.id === controlledId);
 
       for (const p of currentWorld.players) {
@@ -479,8 +556,8 @@ export function GameStage({
             grounded: p.grounded,
           });
         } else {
-          pose.x += (p.x - pose.x) * smoothFactor;
-          pose.y += (p.y - pose.y) * smoothFactor;
+          pose.x += (p.x - pose.x) * remoteSmooth;
+          pose.y += (p.y - pose.y) * remoteSmooth;
           pose.vx = p.vx;
           pose.vy = p.vy;
           pose.facing = p.facing;
@@ -488,12 +565,99 @@ export function GameStage({
         }
       }
 
+      // 4. Smooth 60 FPS moving platforms, crates & keys (eliminates 30 Hz entity judder!)
+      const entitySmooth = 1 - Math.exp(-24 * dtSec);
+      const targetPlatforms =
+        predWorld && predWorld.levelId === currentWorld.levelId
+          ? predWorld.movingPlatforms
+          : currentWorld.movingPlatforms;
+      if (smoothPlatformsRef.current.length !== targetPlatforms.length) {
+        smoothPlatformsRef.current = targetPlatforms.map((m) => ({ ...m }));
+      } else {
+        for (let i = 0; i < targetPlatforms.length; i += 1) {
+          const tgt = targetPlatforms[i]!;
+          const cur = smoothPlatformsRef.current[i]!;
+          if (Math.hypot(tgt.x - cur.x, tgt.y - cur.y) > 48) {
+            cur.x = tgt.x;
+            cur.y = tgt.y;
+          } else {
+            cur.x += (tgt.x - cur.x) * entitySmooth;
+            cur.y += (tgt.y - cur.y) * entitySmooth;
+          }
+          cur.active = tgt.active;
+        }
+      }
+
+      const targetCrates =
+        predWorld && predWorld.levelId === currentWorld.levelId
+          ? predWorld.crates
+          : currentWorld.crates;
+      if (smoothCratesRef.current.length !== targetCrates.length) {
+        smoothCratesRef.current = targetCrates.map((c) => ({ ...c }));
+      } else {
+        for (let i = 0; i < targetCrates.length; i += 1) {
+          const tgt = targetCrates[i]!;
+          const cur = smoothCratesRef.current[i]!;
+          if (Math.hypot(tgt.x - cur.x, tgt.y - cur.y) > 48) {
+            cur.x = tgt.x;
+            cur.y = tgt.y;
+          } else {
+            cur.x += (tgt.x - cur.x) * entitySmooth;
+            cur.y += (tgt.y - cur.y) * entitySmooth;
+          }
+          cur.activePushers = currentWorld.crates[i]?.activePushers ?? tgt.activePushers;
+        }
+      }
+
+      const targetKeys = currentWorld.keys;
+      if (smoothKeysRef.current.length !== targetKeys.length) {
+        smoothKeysRef.current = targetKeys.map((k) => ({ ...k }));
+      } else {
+        for (let i = 0; i < targetKeys.length; i += 1) {
+          const tgt = targetKeys[i]!;
+          const cur = smoothKeysRef.current[i]!;
+          if (Math.hypot(tgt.x - cur.x, tgt.y - cur.y) > 64) {
+            cur.x = tgt.x;
+            cur.y = tgt.y;
+          } else {
+            cur.x += (tgt.x - cur.x) * entitySmooth;
+            cur.y += (tgt.y - cur.y) * entitySmooth;
+          }
+          cur.carrierPlayerId = tgt.carrierPlayerId;
+          cur.used = tgt.used;
+        }
+      }
+
+      // 5. Direct DOM timer update (ZERO React re-renders during gameplay!)
+      const displayTimeMs = currentWorld.completionTimeMs ?? currentWorld.elapsedMs;
+      const nextHudText = formatTimer(displayTimeMs);
+      if (nextHudText !== lastHudText) {
+        lastHudText = nextHudText;
+        if (timerCodeRef.current) {
+          timerCodeRef.current.textContent = nextHudText;
+        }
+      }
+      if (currentWorld.modifier === 'speed_run' && parCodeRef.current) {
+        const nextParText = formatTimer(Math.max(0, level.parTimeMs.gold - displayTimeMs));
+        if (nextParText !== lastParText) {
+          lastParText = nextParText;
+          parCodeRef.current.textContent = nextParText;
+        }
+      }
+
+      // 6. Fast cached Canvas2D render (0 shadowBlur, 1 static-layer blit, 60 FPS entities)
       const canvas = canvasRef.current;
       if (canvas) {
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { alpha: false });
         if (ctx) {
-          rendererRef.current?.render(ctx, currentWorld, poses, localUserId, dtSec, {
-            level: activeLevelRef.current,
+          const renderWorld: GameWorldState = {
+            ...currentWorld,
+            movingPlatforms: smoothPlatformsRef.current,
+            crates: smoothCratesRef.current,
+            keys: smoothKeysRef.current,
+          };
+          rendererRef.current?.render(ctx, renderWorld, poses, localUserId, dtSec, {
+            level,
             viewportWidth: viewportRef.current.w,
             viewportHeight: viewportRef.current.h,
             fillViewport: settingsRef.current.fillViewport,
@@ -512,7 +676,7 @@ export function GameStage({
 
     rafId = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(rafId);
-  }, [computeButtons, flushInput, localUserId, onSwapSolo]);
+  }, [computeButtons, flushInputImmediate, localUserId, onSendInput, onSwapSolo]);
 
   const setTouchBit = (bit: number, active: boolean) => {
     soundRef.current?.unlock();
@@ -521,7 +685,7 @@ export function GameStage({
     } else {
       touchBitsRef.current &= ~bit;
     }
-    flushInput(false);
+    flushInputImmediate(false);
   };
 
   const controlledPlayer: SimPlayerState | undefined = useMemo(() => {
@@ -579,11 +743,11 @@ export function GameStage({
             </span>
           )}
           <span className="hud-stat">
-            <code>{formatTimer(displayTimeMs)}</code>
+            <code ref={timerCodeRef}>{formatTimer(displayTimeMs)}</code>
           </span>
           {goldParRemaining !== null && (
             <span className="hud-stat">
-              Par <code>{formatTimer(goldParRemaining)}</code>
+              Par <code ref={parCodeRef}>{formatTimer(goldParRemaining)}</code>
             </span>
           )}
           {!settings.cinemaMode && (

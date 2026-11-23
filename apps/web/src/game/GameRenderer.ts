@@ -40,15 +40,19 @@ export interface ActiveEmote {
 const EMOTE_LABEL_MAP = new Map<EmotePingId, string>(EMOTE_PINGS.map((e) => [e.id, e.label]));
 
 /**
- * High-contrast dark-theme Canvas2D pixel-art renderer.
- * Uses 3-tier luminance figure-ground hierarchy (Celeste / Hollow Knight style):
- *  - Layer 1 (Backdrop): deep calm midnight (#0B0D16 -> #121728)
- *  - Layer 2 (Terrain): clearly separated cool slate (#28314A) with vivid 4px stage-accent floor caps
- *  - Layer 3 (Interactive & Characters): luminous saturated hues with crisp dark outer outlines
+ * Ultra-fast 60 FPS high-contrast dark-theme Canvas2D pixel-art renderer.
+ * Performance architecture for smooth Discord Activity WebView playback:
+ *  - ZERO ctx.shadowBlur (replaces expensive Gaussian blurs with crisp translucent pixel halos)
+ *  - Offscreen static layer cache: pre-renders backdrop, grid, watermark, beveled walls & one-way
+ *    ledges ONCE per (levelId, highContrast) and blits in a single drawImage() per frame!
+ *  - 3-tier luminance figure-ground hierarchy (Celeste / Hollow Knight style).
  */
 export class GameRenderer {
   private readonly particles: Particle[] = [];
   private animTime = 0;
+
+  private staticCache: HTMLCanvasElement | null = null;
+  private staticCacheKey = '';
 
   spawnEventParticles(events: readonly SimEvent[]): void {
     for (const ev of events) {
@@ -136,17 +140,6 @@ export class GameRenderer {
     ctx.save();
     ctx.imageSmoothingEnabled = false;
 
-    // Seamless full-viewport dark gradient backdrop
-    const outerBg = ctx.createLinearGradient(0, 0, 0, viewH);
-    outerBg.addColorStop(0, '#090B12');
-    outerBg.addColorStop(1, '#101424');
-    ctx.fillStyle = outerBg;
-    ctx.fillRect(0, 0, viewW, viewH);
-
-    // Compute clean transform:
-    // - `fillViewport=true` expands seamlessly to fill 100% of the Discord Activity viewport (up to 12% aspect flex)
-    //   so players NEVER see tiny boxed canvases or wasted margins!
-    // - `fillViewport=false` preserves exact 1:1 uniform aspect ratio.
     const uniformScale = Math.min(viewW / level.width, viewH / level.height);
     let scaleX = uniformScale;
     let scaleY = uniformScale;
@@ -155,70 +148,78 @@ export class GameRenderer {
       const rawScaleY = viewH / level.height;
       const aspectRatioDiff = Math.max(rawScaleX / rawScaleY, rawScaleY / rawScaleX);
       if (aspectRatioDiff <= 1.18) {
-        // Fill 100% edge-to-edge on standard 16:9 / 16:10 / Discord split panes!
         scaleX = rawScaleX;
         scaleY = rawScaleY;
       }
     }
 
-    const offsetX = Math.floor((viewW - level.width * scaleX) / 2);
-    const offsetY = Math.floor((viewH - level.height * scaleY) / 2);
+    const drawW = level.width * scaleX;
+    const drawH = level.height * scaleY;
+    const offsetX = Math.floor((viewW - drawW) / 2);
+    const offsetY = Math.floor((viewH - drawH) / 2);
+
+    // Only fill letterbox bars if present (avoid wasted full-screen overdraw)
+    if (offsetX > 0 || offsetY > 0 || drawW < viewW || drawH < viewH) {
+      ctx.fillStyle = '#090B12';
+      ctx.fillRect(0, 0, viewW, viewH);
+    }
 
     ctx.translate(offsetX, offsetY);
     ctx.scale(scaleX, scaleY);
 
-    // 1. Calm dark atmospheric chamber backdrop (low luminance so terrain & players POP!)
-    this.drawBackground(ctx, level);
+    // 1. Single-blit cached static layer (backdrop + grid + watermark + all beveled walls + one-way ledges)
+    const staticCanvas = this.getOrBuildStaticLayer(level, highContrast);
+    if (staticCanvas) {
+      ctx.drawImage(staticCanvas, 0, 0);
+    } else {
+      this.drawBackground(ctx, level);
+      this.drawSolids(ctx, level, highContrast);
+      this.drawOneWayPlatforms(ctx, level);
+    }
 
     // 2. Crisp diegetic hint stencils
     this.drawChamberCues(ctx, level, world);
 
-    // 3. Glowing circuit wires
+    // 3. Glowing circuit wires (fast layered stroke, zero shadowBlur)
     this.drawWires(ctx, level, world);
 
-    // 4. High-contrast beveled terrain with bright stage-accent floor caps
-    this.drawSolids(ctx, level, highContrast);
-
-    // 5. One-way jump-through platforms
-    this.drawOneWayPlatforms(ctx, level);
-
-    // 6. Crumbling warning platforms
+    // 4. Crumbling warning platforms
     this.drawCrumblePlatforms(ctx, level, world);
 
-    // 7. Bright crimson plasma hazard pits
+    // 5. Bright crimson plasma hazard pits
     this.drawHazards(ctx, level);
 
-    // 8. Retractable & timed neon energy bridges
+    // 6. Retractable & timed neon energy bridges
     this.drawBridges(ctx, level, world);
 
-    // 9. Moving platforms & guide tracks
+    // 7. Moving platforms & guide tracks
     this.drawMovingPlatforms(ctx, level, world, highContrast);
 
-    // 10. Bounce / Spring pads
+    // 8. Bounce / Spring pads
     this.drawBouncePads(ctx, level);
 
-    // 11. Checkpoints
+    // 9. Checkpoints
     this.drawCheckpoints(ctx, level, world);
 
-    // 12. Switch-controlled laser beams
+    // 10. Switch-controlled laser beams
     this.drawLasers(ctx, level, world);
 
-    // 13. Locked security gates
+    // 11. Locked security gates
     this.drawLockedGates(ctx, level, world);
 
-    // 14. Cooperative switches
+    // 12. Cooperative switches
     this.drawSwitches(ctx, level, world);
 
-    // 15. High-contrast Amber x1 & Violet x2 cooperative push crates
+    // 13. High-contrast Amber x1 & Violet x2 cooperative push crates
     this.drawCrates(ctx, level, world, highContrast);
 
-    // 16. Exit door portal
+    // 14. Exit door portal
     this.drawExitDoor(ctx, level, world);
 
-    // 17. Radiant gold keys
-    this.drawKeys(ctx, level, world);
+    // 15. Radiant gold keys
+    this.drawKeys(ctx, level, world, posesByPlayerId);
 
-    // 18. Crisp dark-outlined vivid pixel players + emotes
+    // 16. Crisp dark-outlined vivid pixel players + emotes
     const controlledId = world.soloPractice ? (world.soloActiveId ?? localUserId) : localUserId;
     const ordered = [...world.players].sort((a, b) => {
       if (a.id === controlledId) return 1;
@@ -251,12 +252,38 @@ export class GameRenderer {
       });
     }
 
-    // 19. Pixel particles
-    if (!reducedMotion) {
+    // 17. Pixel particles
+    if (!reducedMotion && this.particles.length > 0) {
       this.drawParticles(ctx);
     }
 
     ctx.restore();
+  }
+
+  private getOrBuildStaticLayer(
+    level: LevelDefinition,
+    highContrast: boolean,
+  ): HTMLCanvasElement | null {
+    if (typeof document === 'undefined') return null;
+    const key = `${level.id}:${level.width}x${level.height}:${highContrast ? 'hc' : 'std'}`;
+    if (this.staticCache && this.staticCacheKey === key) {
+      return this.staticCache;
+    }
+
+    const canvas = this.staticCache ?? document.createElement('canvas');
+    canvas.width = level.width;
+    canvas.height = level.height;
+    const sctx = canvas.getContext('2d', { alpha: false });
+    if (!sctx) return null;
+
+    sctx.imageSmoothingEnabled = false;
+    this.drawBackground(sctx, level);
+    this.drawSolids(sctx, level, highContrast);
+    this.drawOneWayPlatforms(sctx, level);
+
+    this.staticCache = canvas;
+    this.staticCacheKey = key;
+    return canvas;
   }
 
   private drawBackground(ctx: CanvasRenderingContext2D, level: LevelDefinition): void {
@@ -280,21 +307,19 @@ export class GameRenderer {
     ctx.fillStyle = gradRight;
     ctx.fillRect(0, 0, level.width, level.height);
 
-    // Subtle low-contrast blueprint grid (never fights terrain)
+    // Subtle low-contrast blueprint grid (batched single stroke)
     ctx.strokeStyle = 'rgba(56, 68, 98, 0.22)';
     ctx.lineWidth = 1;
+    ctx.beginPath();
     for (let x = 32; x < level.width; x += 32) {
-      ctx.beginPath();
       ctx.moveTo(x + 0.5, 24);
       ctx.lineTo(x + 0.5, level.height);
-      ctx.stroke();
     }
     for (let y = 32; y < level.height; y += 32) {
-      ctx.beginPath();
       ctx.moveTo(24, y + 0.5);
       ctx.lineTo(level.width - 24, y + 0.5);
-      ctx.stroke();
     }
+    ctx.stroke();
 
     // Subtle background watermark with stage code (1..4, S1..S4, ∞)
     ctx.fillStyle = 'rgba(230, 234, 242, 0.06)';
@@ -317,11 +342,11 @@ export class GameRenderer {
       if (cue.hideWhenSwitchLatched && swMap.get(cue.hideWhenSwitchLatched)?.latched) continue;
       const color =
         cue.accent === 'mint'
-          ? 'rgba(79, 240, 214, 0.82)'
+          ? 'rgba(79, 240, 214, 0.86)'
           : cue.accent === 'amber'
-            ? 'rgba(255, 200, 97, 0.85)'
-            : 'rgba(180, 155, 255, 0.85)';
-      ctx.fillStyle = 'rgba(11, 13, 22, 0.65)';
+            ? 'rgba(255, 200, 97, 0.88)'
+            : 'rgba(180, 155, 255, 0.88)';
+      ctx.fillStyle = 'rgba(11, 13, 22, 0.68)';
       const tw = ctx.measureText(cue.text).width;
       ctx.fillRect(cue.x - tw / 2 - 4, cue.y - 10, tw + 8, 13);
       ctx.fillStyle = color;
@@ -335,6 +360,8 @@ export class GameRenderer {
     world: GameWorldState,
   ): void {
     const swMap = new Map(world.switches.map((s) => [s.id, s]));
+    ctx.lineCap = 'square';
+    ctx.lineJoin = 'miter';
 
     for (const wire of level.wires) {
       const sw = swMap.get(wire.linkedTo);
@@ -352,27 +379,31 @@ export class GameRenderer {
               ? '#FF5C80'
               : '#B49BFF';
 
-      ctx.save();
-      ctx.lineCap = 'square';
-      ctx.lineJoin = 'miter';
+      ctx.beginPath();
+      for (let i = 0; i < wire.points.length; i += 1) {
+        const pt = wire.points[i]!;
+        if (i === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      }
 
+      // Conduit backing
       ctx.strokeStyle = '#181E30';
       ctx.lineWidth = 4;
-      ctx.beginPath();
-      wire.points.forEach((pt, idx) => {
-        if (idx === 0) ctx.moveTo(pt.x, pt.y);
-        else ctx.lineTo(pt.x, pt.y);
-      });
       ctx.stroke();
+
+      // Fast translucent halo when lit (zero shadowBlur!)
+      if (isLit) {
+        ctx.save();
+        ctx.globalAlpha = 0.28;
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 6;
+        ctx.stroke();
+        ctx.restore();
+      }
 
       ctx.strokeStyle = isLit ? accent : '#384363';
       ctx.lineWidth = 2;
-      if (isLit) {
-        ctx.shadowColor = accent;
-        ctx.shadowBlur = 9;
-      }
       ctx.stroke();
-      ctx.restore();
     }
   }
 
@@ -383,11 +414,9 @@ export class GameRenderer {
   ): void {
     const trim = level.themeAccent;
     for (const rect of level.solids) {
-      // Clearly separated medium-dark slate terrain body
       ctx.fillStyle = '#28314A';
       ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
-      // Tiled 16x16 beveled bricks with visible highlight & shadow
       for (let tx = rect.x; tx < rect.x + rect.w; tx += 16) {
         for (let ty = rect.y; ty < rect.y + rect.h; ty += 16) {
           const bw = Math.min(16, rect.x + rect.w - tx);
@@ -400,12 +429,10 @@ export class GameRenderer {
         }
       }
 
-      // Outer structural rim for crisp silhouette against background
       ctx.strokeStyle = highContrast ? '#E6EAF2' : '#45547A';
       ctx.lineWidth = highContrast ? 1.5 : 1;
       ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
 
-      // Luminous walkable floor cap on top edge (only on non-ceiling platforms!)
       if (rect.y > 0) {
         ctx.fillStyle = trim;
         ctx.fillRect(rect.x, rect.y, rect.w, 4);
@@ -421,7 +448,6 @@ export class GameRenderer {
       ctx.fillRect(ow.x, ow.y, ow.w, ow.h);
       ctx.fillStyle = '#67E8F9';
       ctx.fillRect(ow.x, ow.y, ow.w, 3);
-      // Upward chevron notches signifying jump-through affordance
       ctx.fillStyle = '#9CEEFF';
       for (let x = ow.x + 10; x < ow.x + ow.w - 8; x += 18) {
         ctx.fillRect(x, ow.y + 6, 6, 1);
@@ -461,11 +487,9 @@ export class GameRenderer {
       ctx.lineWidth = 1.5;
       ctx.strokeRect(x + 0.5, y + 0.5, def.w - 1, def.h - 1);
 
-      // Bright warning stripe on top
       ctx.fillStyle = st.state === 'shaking' ? '#FF7B3D' : '#FFD166';
       ctx.fillRect(x + 1, y + 1, def.w - 2, 3);
 
-      // Fracture lines
       ctx.fillStyle = '#18120C';
       ctx.fillRect(x + Math.round(def.w * 0.35), y + 4, 2, def.h - 5);
       ctx.fillRect(x + Math.round(def.w * 0.68), y + 5, 2, def.h - 6);
@@ -475,26 +499,23 @@ export class GameRenderer {
   private drawBouncePads(ctx: CanvasRenderingContext2D, level: LevelDefinition): void {
     for (const pad of level.bouncePads ?? []) {
       const color = pad.accent === 'amber' ? '#FFB84D' : '#4FF0D6';
+      const halo = pad.accent === 'amber' ? 'rgba(255, 184, 77, 0.25)' : 'rgba(79, 240, 214, 0.25)';
       const pulse = Math.round(Math.sin(this.animTime * 6) * 1);
 
-      // Dark housing base
       ctx.fillStyle = '#20263A';
       ctx.fillRect(pad.x, pad.y + 5, pad.w, pad.h - 5);
 
-      // Spring coils
       ctx.fillStyle = '#9AA6C7';
       ctx.fillRect(pad.x + 6, pad.y + 3, 3, 4);
       ctx.fillRect(pad.x + pad.w - 9, pad.y + 3, 3, 4);
 
-      // Glowing launch cap
-      ctx.save();
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 10;
+      // Fast halo + launch cap (zero shadowBlur)
+      ctx.fillStyle = halo;
+      ctx.fillRect(pad.x - 3, pad.y + pulse - 2, pad.w + 6, 8);
       ctx.fillStyle = color;
       ctx.fillRect(pad.x - 1, pad.y + pulse, pad.w + 2, 4);
       ctx.fillStyle = '#E6EAF2';
       ctx.fillRect(pad.x + 2, pad.y + pulse, pad.w - 4, 1);
-      ctx.restore();
     }
   }
 
@@ -506,26 +527,22 @@ export class GameRenderer {
     for (const cp of level.checkpoints ?? []) {
       const active = world.activeCheckpointId === cp.id;
       const poleX = cp.x + 6;
-      // Pole
       ctx.fillStyle = active ? '#E6EAF2' : '#586485';
       ctx.fillRect(poleX, cp.y + 4, 3, cp.h - 4);
       ctx.fillStyle = '#2E3854';
       ctx.fillRect(cp.x + 2, cp.y + cp.h - 4, 12, 4);
 
-      // Flag / beacon pennant
-      ctx.save();
+      const wave = active ? Math.round(Math.sin(this.animTime * 7) * 1.5) : 0;
       if (active) {
-        ctx.shadowColor = '#4FF0D6';
-        ctx.shadowBlur = 12;
+        ctx.fillStyle = 'rgba(79, 240, 214, 0.24)';
+        ctx.fillRect(poleX + 1, cp.y + 3, 15, 12 + wave);
       }
       ctx.fillStyle = active ? '#4FF0D6' : '#3C4766';
-      const wave = active ? Math.round(Math.sin(this.animTime * 7) * 1.5) : 0;
       ctx.fillRect(poleX + 3, cp.y + 5, 11, 8 + wave);
       ctx.fillStyle = active ? '#101116' : '#717E9E';
       ctx.font = '800 7px monospace';
       ctx.textAlign = 'center';
       ctx.fillText(active ? 'CP' : '·', poleX + 8, cp.y + 12);
-      ctx.restore();
     }
   }
 
@@ -540,7 +557,6 @@ export class GameRenderer {
       const state = world.lasers[i];
       const active = state ? state.active : true;
 
-      // Top & bottom emitter housings
       ctx.fillStyle = '#333F5E';
       ctx.fillRect(def.x - 3, def.y, def.w + 6, 6);
       ctx.fillRect(def.x - 3, def.y + def.h - 6, def.w + 6, 6);
@@ -552,28 +568,27 @@ export class GameRenderer {
         continue;
       }
 
-      // High-contrast lethal crimson laser beam
-      ctx.save();
-      ctx.shadowColor = '#FF3B6B';
-      ctx.shadowBlur = 14;
+      // Fast outer laser aura + crimson beam + pulsing core (zero shadowBlur)
+      ctx.fillStyle = 'rgba(255, 59, 107, 0.24)';
+      ctx.fillRect(def.x - 4, def.y + 5, def.w + 8, def.h - 10);
       ctx.fillStyle = '#FF3B6B';
       ctx.fillRect(def.x, def.y + 5, def.w, def.h - 10);
       const corePulse = 0.75 + 0.25 * Math.sin(this.animTime * 22);
       ctx.fillStyle = `rgba(255, 224, 234, ${corePulse.toFixed(2)})`;
       ctx.fillRect(def.x + 2, def.y + 5, Math.max(2, def.w - 4), def.h - 10);
-      ctx.restore();
     }
   }
 
   private drawHazards(ctx: CanvasRenderingContext2D, level: LevelDefinition): void {
+    const pulse = 0.75 + 0.25 * Math.sin(this.animTime * 5);
     for (const h of level.hazards) {
       ctx.fillStyle = '#2B0D18';
       ctx.fillRect(h.x, h.y, h.w, h.h);
 
-      const pulse = 0.75 + 0.25 * Math.sin(this.animTime * 5);
-      ctx.save();
-      ctx.shadowColor = '#FF3B6B';
-      ctx.shadowBlur = 10;
+      // Fast plasma surface aura (zero shadowBlur)
+      ctx.fillStyle = 'rgba(255, 59, 107, 0.22)';
+      ctx.fillRect(h.x, h.y - 2, h.w, 12);
+
       ctx.fillStyle = `rgba(255, 59, 107, ${pulse.toFixed(2)})`;
       ctx.fillRect(h.x, h.y + 4, h.w, 5);
 
@@ -583,7 +598,6 @@ export class GameRenderer {
         ctx.fillRect(sx, h.y + 1 + waveY, 6, 3);
         ctx.fillRect(sx + 2, h.y - 1 + waveY, 2, 2);
       }
-      ctx.restore();
     }
   }
 
@@ -616,10 +630,11 @@ export class GameRenderer {
         continue;
       }
 
-      ctx.save();
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 12;
-      ctx.fillStyle = locked ? 'rgba(79, 240, 214, 0.34)' : 'rgba(180, 155, 255, 0.34)';
+      // Fast outer neon halo (zero shadowBlur)
+      ctx.fillStyle = locked ? 'rgba(79, 240, 214, 0.16)' : 'rgba(180, 155, 255, 0.16)';
+      ctx.fillRect(def.x - 2, def.y - 3, def.w + 4, def.h + 6);
+
+      ctx.fillStyle = locked ? 'rgba(79, 240, 214, 0.36)' : 'rgba(180, 155, 255, 0.36)';
       ctx.fillRect(def.x, def.y, def.w, def.h);
 
       ctx.fillStyle = color;
@@ -632,12 +647,11 @@ export class GameRenderer {
         ctx.fillRect(def.x + 2, def.y + 5, Math.round((def.w - 4) * ratio), 5);
       } else {
         const shimmerOffset = Math.floor(this.animTime * 48) % 16;
-        ctx.fillStyle = 'rgba(235, 242, 255, 0.4)';
+        ctx.fillStyle = 'rgba(235, 242, 255, 0.42)';
         for (let bx = def.x + shimmerOffset; bx < def.x + def.w - 4; bx += 16) {
           ctx.fillRect(bx, def.y + 6, 6, 4);
         }
       }
-      ctx.restore();
     }
   }
 
@@ -704,14 +718,12 @@ export class GameRenderer {
         continue;
       }
 
-      ctx.save();
       ctx.fillStyle = '#232B42';
       ctx.fillRect(def.x, def.y, def.w, def.h);
-      ctx.shadowColor = accent;
-      ctx.shadowBlur = 12;
+      ctx.fillStyle = `${accent}33`;
+      ctx.fillRect(def.x - 2, def.y + 2, def.w + 4, def.h - 4);
       ctx.fillStyle = accent;
       ctx.fillRect(def.x + 4, def.y + 4, def.w - 8, def.h - 8);
-      ctx.restore();
 
       const cy = def.y + def.h / 2;
       ctx.fillStyle = '#0D101B';
@@ -740,13 +752,11 @@ export class GameRenderer {
       const effectiveReq = world.soloPractice ? 1 : c.requiredPushers;
       const isBeingPushedEnough = c.activePushers >= effectiveReq;
 
-      ctx.save();
       if (isBeingPushedEnough) {
-        ctx.shadowColor = accent;
-        ctx.shadowBlur = 12;
+        ctx.fillStyle = `${accent}30`;
+        ctx.fillRect(x - 3, y - 3, c.w + 6, c.h + 6);
       }
 
-      // High-contrast crate body clearly distinct from blue-slate walls!
       ctx.fillStyle = bodyFill;
       ctx.fillRect(x, y, c.w, c.h);
 
@@ -759,7 +769,6 @@ export class GameRenderer {
       ctx.lineTo(x + 4, y + c.h - 4);
       ctx.stroke();
 
-      // Bright perimeter frame + corner bolts
       ctx.strokeStyle = highContrast ? '#E6EAF2' : accent;
       ctx.lineWidth = 2;
       ctx.strokeRect(x + 1, y + 1, c.w - 2, c.h - 2);
@@ -770,7 +779,6 @@ export class GameRenderer {
       ctx.fillRect(x + 3, y + c.h - 5, 2, 2);
       ctx.fillRect(x + c.w - 5, y + c.h - 5, 2, 2);
 
-      ctx.shadowBlur = 0;
       ctx.fillStyle = 'rgba(11, 13, 22, 0.88)';
       ctx.fillRect(x + 4, y + c.h / 2 - 6, c.w - 8, 12);
       ctx.fillStyle = isBeingPushedEnough ? '#4FF0D6' : accent;
@@ -783,7 +791,6 @@ export class GameRenderer {
         ctx.font = '800 8px monospace';
         ctx.fillText('1/2 PUSH', x + c.w / 2, y - 5);
       }
-      ctx.restore();
     }
   }
 
@@ -791,8 +798,8 @@ export class GameRenderer {
     ctx: CanvasRenderingContext2D,
     level: LevelDefinition,
     world: GameWorldState,
+    posesByPlayerId: ReadonlyMap<string, RenderedPlayerPose>,
   ): void {
-    const playerById = new Map(world.players.map((p) => [p.id, p]));
     for (let i = 0; i < level.keys.length; i += 1) {
       const key = world.keys[i]!;
       if (key.used) continue;
@@ -802,20 +809,21 @@ export class GameRenderer {
       const ky = Math.round(key.y + bob);
 
       if (key.carrierPlayerId) {
-        const carrier = playerById.get(key.carrierPlayerId);
-        if (carrier) {
+        const carrierPose = posesByPlayerId.get(key.carrierPlayerId);
+        if (carrierPose) {
           ctx.strokeStyle = 'rgba(255, 209, 102, 0.55)';
           ctx.lineWidth = 1.5;
           ctx.beginPath();
           ctx.moveTo(kx, ky);
-          ctx.lineTo(carrier.x + PHYSICS.PLAYER_WIDTH / 2, carrier.y + 8);
+          ctx.lineTo(carrierPose.x + PHYSICS.PLAYER_WIDTH / 2, carrierPose.y + 8);
           ctx.stroke();
         }
       }
 
-      ctx.save();
-      ctx.shadowColor = '#FFD166';
-      ctx.shadowBlur = 12;
+      // Fast gold halo (zero shadowBlur)
+      ctx.fillStyle = 'rgba(255, 209, 102, 0.24)';
+      ctx.fillRect(kx - 9, ky - 7, 22, 13);
+
       // Dark outline for instant readability
       ctx.fillStyle = '#0B0D16';
       ctx.fillRect(kx - 7, ky - 5, 9, 9);
@@ -829,7 +837,6 @@ export class GameRenderer {
       ctx.fillRect(kx + 1, ky - 1, 9, 2);
       ctx.fillRect(kx + 5, ky + 1, 2, 3);
       ctx.fillRect(kx + 8, ky + 1, 2, 3);
-      ctx.restore();
     }
   }
 
@@ -854,16 +861,15 @@ export class GameRenderer {
       const plateY = depressed ? def.y + 3 : def.y;
       const plateH = depressed ? def.h - 3 : def.h;
 
-      ctx.save();
       if (active) {
-        ctx.shadowColor = accent;
-        ctx.shadowBlur = 12;
+        ctx.fillStyle = `${accent}30`;
+        ctx.fillRect(def.x - 3, plateY - 3, def.w + 6, plateH + 5);
       }
+
       ctx.fillStyle = active ? accent : '#647299';
       ctx.fillRect(def.x, plateY, def.w, plateH);
       ctx.fillStyle = '#E6EAF2';
       ctx.fillRect(def.x + 2, plateY, def.w - 4, 1);
-      ctx.restore();
 
       ctx.fillStyle = active ? accent : '#C4CEE6';
       ctx.font = '800 8px monospace';
@@ -893,17 +899,16 @@ export class GameRenderer {
     ctx.strokeRect(door.x - 3, door.y - 5, door.w + 6, door.h + 4);
 
     if (unlocked) {
-      ctx.save();
-      const pulse = 0.34 + 0.14 * Math.sin(this.animTime * 4);
+      const pulse = 0.32 + 0.12 * Math.sin(this.animTime * 4);
+      // Outer portal glow halo (zero shadowBlur)
+      ctx.fillStyle = 'rgba(79, 240, 214, 0.16)';
+      ctx.fillRect(door.x - 7, door.y - 9, door.w + 14, door.h + 12);
       ctx.fillStyle = `rgba(79, 240, 214, ${pulse.toFixed(2)})`;
       ctx.fillRect(door.x, door.y, door.w, door.h);
 
-      ctx.shadowColor = '#4FF0D6';
-      ctx.shadowBlur = 16;
       ctx.strokeStyle = '#4FF0D6';
       ctx.lineWidth = 2.5;
       ctx.strokeRect(door.x + 3, door.y + 3, door.w - 6, door.h - 4);
-      ctx.restore();
 
       ctx.fillStyle = '#E6EAF2';
       ctx.font = '900 11px monospace';
@@ -1008,23 +1013,22 @@ export class GameRenderer {
     const bodyY = py - stretchY;
     const bodyH = h - 4 + stretchY;
 
-    // Crisp 1px dark outer silhouette outline so every character POPS against any surface!
+    // Fast controlled-player aura (zero shadowBlur!)
+    if (opts.isControlled) {
+      ctx.fillStyle = `${player.color}30`;
+      ctx.fillRect(px - 3, bodyY - 2, w + 6, bodyH + 4);
+    }
+
+    // Crisp 1px dark outer silhouette outline
     ctx.fillStyle = '#090B12';
     ctx.fillRect(px - 1, bodyY, w + 2, bodyH);
     ctx.fillRect(px + 1, py + h - 4, 7, 5);
     ctx.fillRect(px + w - 8, py + h - 4, 7, 5);
 
-    if (opts.isControlled) {
-      ctx.shadowColor = player.color;
-      ctx.shadowBlur = 11;
-    }
-
     // Vivid player torso
     ctx.fillStyle = player.color;
     ctx.fillRect(px + 1, bodyY + 1, w - 2, bodyH - 2);
     ctx.fillRect(px, bodyY + 3, w, bodyH - 6);
-
-    ctx.shadowBlur = 0;
 
     if (opts.highContrast) {
       ctx.strokeStyle = '#E6EAF2';
@@ -1106,7 +1110,7 @@ export class GameRenderer {
     lifeSec: number,
   ): void {
     for (let i = 0; i < count; i += 1) {
-      if (this.particles.length >= 180) break;
+      if (this.particles.length >= 160) break;
       this.particles.push({
         x,
         y,
@@ -1136,11 +1140,10 @@ export class GameRenderer {
 
   private drawParticles(ctx: CanvasRenderingContext2D): void {
     for (const pt of this.particles) {
-      ctx.save();
       ctx.globalAlpha = Math.max(0, Math.min(1, pt.life / pt.maxLife));
       ctx.fillStyle = pt.color;
       ctx.fillRect(Math.round(pt.x), Math.round(pt.y), pt.size, pt.size);
-      ctx.restore();
     }
+    ctx.globalAlpha = 1;
   }
 }

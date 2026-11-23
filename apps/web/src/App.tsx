@@ -8,7 +8,7 @@ import type {
 } from '@together/game-core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GameMenu } from './components/GameMenu.js';
-import { GameStage } from './components/GameStage.js';
+import { GameStage, type SnapshotBus, type SnapshotListener } from './components/GameStage.js';
 import {
   type ActivitySessionContext,
   type BootProgress,
@@ -29,6 +29,25 @@ function formatTime(): string {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function shouldSyncReactWorld(prev: GameWorldState | null, next: GameWorldState): boolean {
+  if (!prev) return true;
+  if (prev.levelId !== next.levelId) return true;
+  if (prev.proceduralSeed !== next.proceduralSeed) return true;
+  if (prev.modifier !== next.modifier) return true;
+  if (prev.status !== next.status) return true;
+  if (prev.respawnCount !== next.respawnCount) return true;
+  if (prev.soloPractice !== next.soloPractice) return true;
+  if (prev.soloActiveId !== next.soloActiveId) return true;
+  if (prev.players.length !== next.players.length) return true;
+  let prevConn = 0;
+  let nextConn = 0;
+  for (let i = 0; i < prev.players.length; i += 1) {
+    if (prev.players[i]!.connected) prevConn += 1;
+    if (next.players[i]!.connected) nextConn += 1;
+  }
+  return prevConn !== nextConn;
+}
+
 export function App() {
   const [bootProgress, setBootProgress] = useState<BootProgress>({
     step: 'init',
@@ -42,8 +61,6 @@ export function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [room, setRoom] = useState<ActivityRoomState | null>(null);
   const [world, setWorld] = useState<GameWorldState | null>(null);
-  const [latestEvents, setLatestEvents] = useState<SimEvent[]>([]);
-  const [eventBatchId, setEventBatchId] = useState<number>(0);
   const [emotesByPlayerId, setEmotesByPlayerId] = useState<Map<string, ActiveEmote>>(
     () => new Map(),
   );
@@ -55,6 +72,24 @@ export function App() {
 
   const socketRef = useRef<ActivitySocketClient | null>(null);
   const logSeqRef = useRef(0);
+  const lastReactWorldRef = useRef<GameWorldState | null>(null);
+  const latestWorldRef = useRef<GameWorldState | null>(null);
+  const snapshotListenersRef = useRef<Set<SnapshotListener>>(new Set());
+
+  const snapshotBus = useMemo<SnapshotBus>(
+    () => ({
+      subscribe(listener: SnapshotListener) {
+        snapshotListenersRef.current.add(listener);
+        return () => {
+          snapshotListenersRef.current.delete(listener);
+        };
+      },
+      getLatest() {
+        return latestWorldRef.current;
+      },
+    }),
+    [],
+  );
 
   const pushLog = useCallback((text: string) => {
     logSeqRef.current += 1;
@@ -121,6 +156,8 @@ export function App() {
               setRoom(nextRoom);
               setSocketError(null);
               if (nextRoom.phase === 'lobby') {
+                latestWorldRef.current = null;
+                lastReactWorldRef.current = null;
                 setWorld(null);
               }
               if (reason === 'welcome') {
@@ -149,10 +186,17 @@ export function App() {
             },
             onGameSnapshot: (nextWorld, events) => {
               if (!active) return;
-              setWorld(nextWorld);
-              if (events.length > 0) {
-                setLatestEvents(events);
-                setEventBatchId((n) => n + 1);
+              latestWorldRef.current = nextWorld;
+
+              // Zero-React-overhead push directly to 60 FPS canvas loop!
+              for (const listener of snapshotListenersRef.current) {
+                listener(nextWorld, events);
+              }
+
+              // Only trigger React re-render on discrete HUD/modal transitions (0x/sec during gameplay!)
+              if (shouldSyncReactWorld(lastReactWorldRef.current, nextWorld)) {
+                lastReactWorldRef.current = nextWorld;
+                setWorld(nextWorld);
               }
             },
             onPlayerEmote: (playerId, emote) => {
@@ -334,8 +378,7 @@ export function App() {
       <main className="game-viewport-root">
         <GameStage
           world={world}
-          events={latestEvents}
-          eventBatchId={eventBatchId}
+          snapshotBus={snapshotBus}
           emotesByPlayerId={emotesByPlayerId}
           emoteSeq={emoteSeq}
           localUserId={context.user.id}
