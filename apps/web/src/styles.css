@@ -1611,3 +1611,72 @@ code {
   background: rgba(11, 13, 22, 0.52);
   border-color: rgba(230, 234, 242, 0.12);
 }
+
+.menu-top-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.menu-icon-pill,
+.menu-invite-pill {
+  cursor: pointer;
+  transition: border-color 150ms ease, background-color 150ms ease, transform 120ms ease;
+}
+
+.menu-icon-pill {
+  padding: 8px 11px;
+}
+
+.menu-invite-pill {
+  background: rgba(84, 214, 197, 0.16);
+  border-color: rgba(84, 214, 197, 0.45);
+  color: #b7faf0;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.menu-invite-pill:hover,
+.menu-icon-pill:hover {
+  border-color: var(--accent-secondary);
+  background: rgba(36, 40, 56, 0.94);
+  transform: translateY(-1px);
+}
+
+.chamber-badges-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-coin-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.76rem;
+}
+
+.coin-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: #ffe066;
+  border: 1px solid #0b0d16;
+  box-shadow: 0 0 0 1px rgba(255, 224, 102, 0.4);
+  display: inline-block;
+}
+
+.victory-stats-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.diagnostics-details {
+  padding-top: 10px;
+}
+
+.diagnostics-summary {
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 0;
+}

@@ -359,6 +359,14 @@ export async function createActivityServer(options: {
           roomManager.swapSoloPuppet(socket);
           return;
         }
+        case 'toggle_solo_follow': {
+          roomManager.toggleSoloFollow(socket);
+          return;
+        }
+        case 'respawn_self': {
+          roomManager.respawnSelf(socket);
+          return;
+        }
         case 'send_emote': {
           roomManager.sendEmote(socket, message.emote);
           return;

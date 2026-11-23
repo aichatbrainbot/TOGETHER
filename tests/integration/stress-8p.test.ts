@@ -166,14 +166,37 @@ describe('8-Player Concurrent Stress Test & Leaderboard Persistence', () => {
       expect(c.receivedEmotes.some((e) => e.emote === 'stack')).toBe(true);
     }
 
-    // Verify statsStore + /.proxy/api/leaderboard + /.proxy/api/profile/:userId
+    // Verify Ranked clears (standard) enter leaderboard & profiles cleanly, while Unranked chaos (low_gravity) does NOT pollute ranked leaderboard!
     server.statsStore.recordClear({
       levelId: 'chamber-03',
       levelName: 'CHAMBER 03 · Leverage',
       modifier: 'low_gravity',
+      completionTimeMs: 12_000,
+      respawnCount: 0,
+      medal: 'gold',
+      coinsCollected: 3,
+      totalCoins: 3,
+      soloPractice: false,
+      players: userIds.map((id, i) => ({
+        id,
+        displayName: `Squad_${i + 1}`,
+        contribution: { switchesTriggered: 1, keysCollected: 0, respawns: 0 },
+      })),
+    });
+
+    const afterUnrankedLb = await fetch(`${httpBase}/.proxy/api/leaderboard?levelId=chamber-03`);
+    const afterUnrankedJson = (await afterUnrankedLb.json()) as { entries: LeaderboardEntry[] };
+    expect(afterUnrankedJson.entries).toHaveLength(0);
+
+    server.statsStore.recordClear({
+      levelId: 'chamber-03',
+      levelName: 'STAGE 3 · Leverage',
+      modifier: 'standard',
       completionTimeMs: 41_200,
       respawnCount: 2,
       medal: 'gold',
+      coinsCollected: 3,
+      totalCoins: 3,
       soloPractice: false,
       players: userIds.map((id, i) => ({
         id,
@@ -187,11 +210,14 @@ describe('8-Player Concurrent Stress Test & Leaderboard Persistence', () => {
     expect(lbJson.entries).toHaveLength(1);
     expect(lbJson.entries[0]?.playerCount).toBe(8);
     expect(lbJson.entries[0]?.medal).toBe('gold');
+    expect(lbJson.entries[0]?.coinsCollected).toBe(3);
 
     const profRes = await fetch(`${httpBase}/.proxy/api/profile/stress_u_1`);
     const profJson = (await profRes.json()) as { profile: PlayerProfileStats | null };
-    expect(profJson.profile?.chambersCleared).toBe(1);
+    expect(profJson.profile?.chambersCleared).toBe(2);
     expect(profJson.profile?.medals.gold).toBe(1);
     expect(profJson.profile?.keysCollected).toBe(1);
+    expect(profJson.profile?.totalCoinsCollected).toBe(3);
+    expect(profJson.profile?.bestCoinsByLevel?.['chamber-03']).toBe(3);
   });
 });

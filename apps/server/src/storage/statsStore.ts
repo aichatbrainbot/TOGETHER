@@ -16,6 +16,8 @@ export interface RecordClearInput {
   completionTimeMs: number;
   respawnCount: number;
   medal: MedalTier;
+  coinsCollected?: number;
+  totalCoins?: number;
   soloPractice: boolean;
   players: ReadonlyArray<{
     id: string;
@@ -37,6 +39,7 @@ interface PersistedStatsFile {
 }
 
 const MAX_LEADERBOARD_ENTRIES = 120;
+const MEDAL_RANK: Record<MedalTier, number> = { gold: 3, silver: 2, bronze: 1 };
 
 export class JsonStatsStore implements StatsStore {
   private leaderboard: LeaderboardEntry[] = [];
@@ -50,6 +53,9 @@ export class JsonStatsStore implements StatsStore {
 
   recordClear(input: RecordClearInput): LeaderboardEntry {
     const now = Date.now();
+    const isRanked = input.modifier !== 'low_gravity';
+    const coins = input.coinsCollected ?? 0;
+
     const entry: LeaderboardEntry = {
       id: crypto.randomUUID(),
       levelId: input.levelId,
@@ -58,18 +64,26 @@ export class JsonStatsStore implements StatsStore {
       completionTimeMs: input.completionTimeMs,
       respawnCount: input.respawnCount,
       medal: input.medal,
+      coinsCollected: coins,
+      totalCoins: input.totalCoins ?? 3,
       playerCount: input.players.length,
       playerNames: input.players.map((p) => p.displayName),
       soloPractice: input.soloPractice,
       recordedAt: now,
     };
 
-    this.leaderboard.push(entry);
-    this.leaderboard.sort(
-      (a, b) => a.completionTimeMs - b.completionTimeMs || a.respawnCount - b.respawnCount,
-    );
-    if (this.leaderboard.length > MAX_LEADERBOARD_ENTRIES) {
-      this.leaderboard = this.leaderboard.slice(0, MAX_LEADERBOARD_ENTRIES);
+    // Unranked modifiers (e.g. Low Gravity chaos mode) never pollute ranked records or best times
+    if (isRanked) {
+      this.leaderboard.push(entry);
+      this.leaderboard.sort(
+        (a, b) =>
+          a.completionTimeMs - b.completionTimeMs ||
+          (b.coinsCollected ?? 0) - (a.coinsCollected ?? 0) ||
+          a.respawnCount - b.respawnCount,
+      );
+      if (this.leaderboard.length > MAX_LEADERBOARD_ENTRIES) {
+        this.leaderboard = this.leaderboard.slice(0, MAX_LEADERBOARD_ENTRIES);
+      }
     }
 
     for (const p of input.players) {
@@ -78,24 +92,43 @@ export class JsonStatsStore implements StatsStore {
         displayName: p.displayName,
         chambersCleared: 0,
         bestTimesByLevel: {},
+        bestMedalsByLevel: {},
+        bestCoinsByLevel: {},
         medals: { gold: 0, silver: 0, bronze: 0 },
         switchesTriggered: 0,
         keysCollected: 0,
+        totalCoinsCollected: 0,
         totalRespawns: 0,
         lastPlayedAt: now,
       };
 
       existing.displayName = p.displayName;
       existing.chambersCleared += 1;
-      existing.medals[input.medal] += 1;
       existing.switchesTriggered += p.contribution.switchesTriggered;
       existing.keysCollected += p.contribution.keysCollected;
       existing.totalRespawns += p.contribution.respawns;
       existing.lastPlayedAt = now;
 
-      const prevBest = existing.bestTimesByLevel[input.levelId];
-      if (prevBest === undefined || input.completionTimeMs < prevBest) {
-        existing.bestTimesByLevel[input.levelId] = input.completionTimeMs;
+      if (isRanked) {
+        existing.medals[input.medal] += 1;
+        existing.totalCoinsCollected = (existing.totalCoinsCollected ?? 0) + coins;
+
+        const prevBest = existing.bestTimesByLevel[input.levelId];
+        if (prevBest === undefined || input.completionTimeMs < prevBest) {
+          existing.bestTimesByLevel[input.levelId] = input.completionTimeMs;
+        }
+
+        if (!existing.bestMedalsByLevel) existing.bestMedalsByLevel = {};
+        const prevMedal = existing.bestMedalsByLevel[input.levelId];
+        if (!prevMedal || MEDAL_RANK[input.medal] > MEDAL_RANK[prevMedal]) {
+          existing.bestMedalsByLevel[input.levelId] = input.medal;
+        }
+
+        if (!existing.bestCoinsByLevel) existing.bestCoinsByLevel = {};
+        const prevCoins = existing.bestCoinsByLevel[input.levelId] ?? 0;
+        if (coins > prevCoins) {
+          existing.bestCoinsByLevel[input.levelId] = coins;
+        }
       }
 
       this.profiles.set(p.id, existing);

@@ -270,6 +270,11 @@ export function generateProceduralChamber(rawSeed?: number | string | null): Lev
     movingPlatforms,
     crates,
     keys,
+    coins: [
+      { id: 'pc_1', x: 132, y: 332 },
+      { id: 'pc_2', x: ledgeX + 24, y: ledgeY - 38 },
+      { id: 'pc_3', x: pitStartX + Math.round(pitW / 2), y: 316 },
+    ],
     lockedGates,
     exitDoor: { x: 720, y: 336, w: 44, h: 48 },
     requiresVaultSwitches: !useKeyGate,

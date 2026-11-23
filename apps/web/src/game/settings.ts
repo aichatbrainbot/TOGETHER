@@ -1,5 +1,6 @@
 export interface GameSettings {
   soundEnabled: boolean;
+  musicEnabled: boolean;
   volume: number; // 0 to 1
   showPlayerNames: boolean;
   colorblindShapes: boolean;
@@ -9,10 +10,11 @@ export interface GameSettings {
   cinemaMode: boolean;
 }
 
-const STORAGE_KEY = 'together_settings_v3';
+const STORAGE_KEY = 'together_settings_v4';
 
 export const DEFAULT_SETTINGS: GameSettings = {
   soundEnabled: true,
+  musicEnabled: true,
   volume: 0.7,
   showPlayerNames: true,
   colorblindShapes: false,
@@ -26,6 +28,7 @@ export function loadGameSettings(): GameSettings {
   try {
     const raw =
       localStorage.getItem(STORAGE_KEY) ??
+      localStorage.getItem('together_settings_v3') ??
       localStorage.getItem('together_settings_v2') ??
       localStorage.getItem('together_settings_v1');
     if (!raw) return { ...DEFAULT_SETTINGS };
@@ -33,6 +36,8 @@ export function loadGameSettings(): GameSettings {
     return {
       soundEnabled:
         typeof parsed.soundEnabled === 'boolean' ? parsed.soundEnabled : DEFAULT_SETTINGS.soundEnabled,
+      musicEnabled:
+        typeof parsed.musicEnabled === 'boolean' ? parsed.musicEnabled : DEFAULT_SETTINGS.musicEnabled,
       volume:
         typeof parsed.volume === 'number' && Number.isFinite(parsed.volume)
           ? Math.max(0, Math.min(1, parsed.volume))

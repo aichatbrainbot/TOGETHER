@@ -38,12 +38,14 @@ export const PHYSICS = {
   EXIT_HOLD_TICKS: 10,
   CRATE_PUSH_SPEED: 96,
   CRATE_FRICTION: 1250,
+  DROP_THROUGH_TICKS: 10,
 } as const;
 
 export const INPUT_BITS = {
   LEFT: 1 << 0,
   RIGHT: 1 << 1,
   JUMP: 1 << 2,
+  DOWN: 1 << 3,
 } as const;
 
 export type MedalTier = 'gold' | 'silver' | 'bronze';
@@ -63,6 +65,14 @@ export interface SwitchDef extends Rect {
   readonly accent: 'violet' | 'mint' | 'amber';
   readonly durationTicks?: number;
   readonly allowsCrate?: boolean;
+  /** Number of simultaneous players required to trigger (auto-clamps in solo/smaller squads). */
+  readonly requiredPlayers?: number;
+}
+
+export interface CoinDef {
+  readonly id: string;
+  readonly x: number;
+  readonly y: number;
 }
 
 export interface BridgeDef extends Rect {
@@ -182,6 +192,7 @@ export interface LevelDefinition {
   readonly checkpoints?: readonly CheckpointDef[];
   readonly crates: readonly CrateDef[];
   readonly keys: readonly KeyDef[];
+  readonly coins?: readonly CoinDef[];
   readonly lockedGates: readonly LockedGateDef[];
   readonly exitDoor: Rect;
   readonly requiresVaultSwitches: boolean;
@@ -196,6 +207,7 @@ export type SimEventType =
   | 'bounce'
   | 'crumble'
   | 'checkpoint'
+  | 'coin_pickup'
   | 'switch_on'
   | 'bridge_on'
   | 'bridge_lock'
@@ -232,6 +244,7 @@ export interface SimPlayerState {
   standingOnCrateId: string | null;
   coyoteTicks: number;
   jumpBufferTicks: number;
+  dropThroughTicks?: number;
   prevJumpDown: boolean;
   invulnTicks: number;
   atExit: boolean;
@@ -244,6 +257,15 @@ export interface SwitchRuntimeState {
   latched: boolean;
   remainingTicks: number;
   maxTicks: number;
+  pressers?: number;
+  requiredPressers?: number;
+}
+
+export interface CoinRuntimeState {
+  id: string;
+  x: number;
+  y: number;
+  collected: boolean;
 }
 
 export interface BridgeRuntimeState {
@@ -327,6 +349,7 @@ export interface GameWorldState {
   elapsedMs: number;
   soloPractice: boolean;
   soloActiveId: string | null;
+  soloFollow?: boolean;
   status: 'playing' | 'completed';
   completionTimeMs: number | null;
   medal: MedalTier | null;
@@ -340,6 +363,7 @@ export interface GameWorldState {
   lasers: LaserRuntimeState[];
   crates: CrateRuntimeState[];
   keys: KeyRuntimeState[];
+  coins?: CoinRuntimeState[];
   lockedGates: LockedGateRuntimeState[];
   exitDoor: ExitDoorRuntimeState;
   contributions: Record<string, PlayerContribution>;
@@ -353,6 +377,8 @@ export interface LeaderboardEntry {
   completionTimeMs: number;
   respawnCount: number;
   medal: MedalTier;
+  coinsCollected?: number;
+  totalCoins?: number;
   playerCount: number;
   playerNames: string[];
   soloPractice: boolean;
@@ -364,6 +390,8 @@ export interface PlayerProfileStats {
   displayName: string;
   chambersCleared: number;
   bestTimesByLevel: Record<string, number>;
+  bestMedalsByLevel?: Record<string, MedalTier>;
+  bestCoinsByLevel?: Record<string, number>;
   medals: {
     gold: number;
     silver: number;
@@ -371,6 +399,7 @@ export interface PlayerProfileStats {
   };
   switchesTriggered: number;
   keysCollected: number;
+  totalCoinsCollected?: number;
   totalRespawns: number;
   lastPlayedAt: number;
 }

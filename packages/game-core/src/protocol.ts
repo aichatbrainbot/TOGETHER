@@ -75,6 +75,7 @@ export const SimEventSchema = z.object({
     'bounce',
     'crumble',
     'checkpoint',
+    'coin_pickup',
     'switch_on',
     'bridge_on',
     'bridge_lock',
@@ -109,6 +110,7 @@ export const SimPlayerStateSchema = z.object({
   standingOnCrateId: z.string().nullable(),
   coyoteTicks: z.number().int(),
   jumpBufferTicks: z.number().int(),
+  dropThroughTicks: z.number().int().optional(),
   prevJumpDown: z.boolean(),
   invulnTicks: z.number().int(),
   atExit: z.boolean(),
@@ -123,6 +125,7 @@ export const GameWorldStateSchema = z.object({
   elapsedMs: z.number().int().nonnegative(),
   soloPractice: z.boolean(),
   soloActiveId: z.string().nullable(),
+  soloFollow: z.boolean().optional(),
   status: z.enum(['playing', 'completed']),
   completionTimeMs: z.number().int().nullable(),
   medal: MedalTierSchema.nullable(),
@@ -136,6 +139,8 @@ export const GameWorldStateSchema = z.object({
       latched: z.boolean(),
       remainingTicks: z.number().int().nonnegative(),
       maxTicks: z.number().int().nonnegative(),
+      pressers: z.number().int().nonnegative().optional(),
+      requiredPressers: z.number().int().positive().optional(),
     }),
   ),
   bridges: z.array(
@@ -197,6 +202,16 @@ export const GameWorldStateSchema = z.object({
       used: z.boolean(),
     }),
   ),
+  coins: z
+    .array(
+      z.object({
+        id: z.string(),
+        x: z.number(),
+        y: z.number(),
+        collected: z.boolean(),
+      }),
+    )
+    .optional(),
   lockedGates: z.array(
     z.object({
       id: z.string(),
@@ -251,11 +266,19 @@ export const C2SStartGameSchema = z.object({
 export const C2SInputSchema = z.object({
   type: z.literal('input'),
   seq: z.number().int().nonnegative().max(1_000_000_000),
-  buttons: z.number().int().min(0).max(7),
+  buttons: z.number().int().min(0).max(15),
 });
 
 export const C2SSwapSoloPuppetSchema = z.object({
   type: z.literal('swap_solo_puppet'),
+});
+
+export const C2SToggleSoloFollowSchema = z.object({
+  type: z.literal('toggle_solo_follow'),
+});
+
+export const C2SRespawnSelfSchema = z.object({
+  type: z.literal('respawn_self'),
 });
 
 export const C2SSendEmoteSchema = z.object({
@@ -283,6 +306,8 @@ export const C2SMessageSchema = z.discriminatedUnion('type', [
   C2SStartGameSchema,
   C2SInputSchema,
   C2SSwapSoloPuppetSchema,
+  C2SToggleSoloFollowSchema,
+  C2SRespawnSelfSchema,
   C2SSendEmoteSchema,
   C2SRestartLevelSchema,
   C2SReturnLobbySchema,

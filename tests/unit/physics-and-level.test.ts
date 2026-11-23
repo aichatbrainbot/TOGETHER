@@ -530,7 +530,7 @@ describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invaria
     expect(p2.y).toBe(368 - PHYSICS.PLAYER_HEIGHT);
   });
 
-  it('Special Stage S1: allows jumping UP through one-way platforms and landing solidly on top', () => {
+  it('Special Stage S1: allows jumping UP through one-way platforms, landing solidly, and dropping DOWN with INPUT_BITS.DOWN', () => {
     const world = createGameWorld(
       [{ id: 'p1', displayName: 'Sky', slot: 0, connected: true }],
       { level: LEVEL_SPECIAL_S1 },
@@ -538,7 +538,6 @@ describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invaria
     const p1 = world.players[0]!;
     const ow = LEVEL_SPECIAL_S1.oneWayPlatforms![0]!;
 
-    // Start directly beneath one-way platform (y=336) on floor (y=396) and jump upward through it
     p1.x = ow.x + 20;
     p1.y = 396 - PHYSICS.PLAYER_HEIGHT;
     p1.grounded = true;
@@ -555,6 +554,65 @@ describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invaria
     }
     expect(passedAbove).toBe(true);
     expect(landedOnOneWay).toBe(true);
+
+    // Pressing DOWN (S / ArrowDown) cleanly drops player back down through the one-way deck
+    for (let t = 0; t < 24; t += 1) {
+      stepGameWorld(world, { p1: { buttons: t < 4 ? INPUT_BITS.DOWN : 0 } }, LEVEL_SPECIAL_S1);
+    }
+    expect(p1.y + PHYSICS.PLAYER_HEIGHT).toBeGreaterThan(ow.y + 8);
+  });
+
+  it('collects 3 DarkCoins per stage, enforces 2P team switch in co-op, and rejects 24px telekinesis crate push', () => {
+    // 1. All 8 campaign stages ship exactly 3 DarkCoins
+    for (const lvl of CAMPAIGN_LEVELS) {
+      expect(lvl.coins, `${lvl.id} should define 3 DarkCoins`).toHaveLength(3);
+    }
+
+    // 2. Coin pickup fires coin_pickup event & updates runtime state
+    const c1World = createGameWorld(
+      [{ id: 'p1', displayName: 'Collector', slot: 0, connected: true }],
+      { level: LEVEL_CHAMBER_01 },
+    );
+    const coin0 = LEVEL_CHAMBER_01.coins![0]!;
+    c1World.players[0]!.x = coin0.x - 4;
+    c1World.players[0]!.y = coin0.y - 6;
+    const coinEvents = stepGameWorld(c1World, {}, LEVEL_CHAMBER_01);
+    expect(coinEvents.some((e) => e.type === 'coin_pickup')).toBe(true);
+    expect(c1World.coins?.[0]?.collected).toBe(true);
+
+    // 3. Stage S2 2P Team Switch (s2_l1_lock): 1 player is NOT enough in 2P co-op; 2 standing together locks it!
+    const s2World = createGameWorld(
+      [
+        { id: 'p1', displayName: 'A', slot: 0, connected: true },
+        { id: 'p2', displayName: 'B', slot: 1, connected: true },
+      ],
+      { level: LEVEL_SPECIAL_S2 },
+    );
+    const s2Sw = LEVEL_SPECIAL_S2.switches.find((s) => s.id === 's2_l1_lock')!;
+    const s2SwIdx = LEVEL_SPECIAL_S2.switches.findIndex((s) => s.id === 's2_l1_lock');
+    s2World.players[0]!.x = s2Sw.x + 4;
+    s2World.players[0]!.y = 368 - PHYSICS.PLAYER_HEIGHT;
+    stepGameWorld(s2World, {}, LEVEL_SPECIAL_S2);
+    expect(s2World.switches[s2SwIdx]?.latched).toBe(false);
+    expect(s2World.switches[s2SwIdx]?.pressers).toBe(1);
+
+    s2World.players[1]!.x = s2Sw.x + 14;
+    s2World.players[1]!.y = 368 - PHYSICS.PLAYER_HEIGHT;
+    stepGameWorld(s2World, {}, LEVEL_SPECIAL_S2);
+    expect(s2World.switches[s2SwIdx]?.latched).toBe(true);
+    expect(s2World.switches[s2SwIdx]?.pressers).toBe(2);
+
+    // 4. Crate push rejects distant 15px "telekinesis" pushes (requires <= 6px contact!)
+    const c3World = createGameWorld(
+      [{ id: 'p1', displayName: 'Pusher', slot: 0, connected: true }],
+      { level: LEVEL_CHAMBER_03 },
+    );
+    const light = c3World.crates[0]!;
+    const startCrateX = light.x;
+    c3World.players[0]!.x = light.x - PHYSICS.PLAYER_WIDTH - 14;
+    c3World.players[0]!.y = 384 - PHYSICS.PLAYER_HEIGHT;
+    stepGameWorld(c3World, { p1: { buttons: INPUT_BITS.RIGHT } }, LEVEL_CHAMBER_03);
+    expect(light.x).toBeCloseTo(startCrateX, 2);
   });
 
   it('geometric playability invariant: all 8 campaign stages have clean 8P spawns, clear bounce-pad skies, and unobstructed vertical lifts', () => {

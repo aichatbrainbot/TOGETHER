@@ -64,17 +64,20 @@ export const CHALLENGE_MODIFIERS = [
   {
     id: 'standard',
     name: 'Standard',
-    description: 'Balanced cooperative platformer physics.',
-  },
-  {
-    id: 'low_gravity',
-    name: 'Low Gravity',
-    description: 'Moon-chamber physics (0.76x gravity) for floaty stacking.',
+    description: 'Balanced cooperative platformer physics (Ranked).',
+    ranked: true,
   },
   {
     id: 'speed_run',
     name: 'Speed Run',
-    description: 'Tight par-time medal challenge with live countdown.',
+    description: 'Tight par-time medal challenge with live countdown (Ranked).',
+    ranked: true,
+  },
+  {
+    id: 'low_gravity',
+    name: 'Low Gravity',
+    description: 'Moon-chamber physics (0.76x gravity) for floaty chaos (Unranked).',
+    ranked: false,
   },
 ] as const;
 

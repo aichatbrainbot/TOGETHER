@@ -185,6 +185,14 @@ export class ActivitySocketClient {
     this.send({ type: 'swap_solo_puppet' });
   }
 
+  toggleSoloFollow(): void {
+    this.send({ type: 'toggle_solo_follow' });
+  }
+
+  respawnSelf(): void {
+    this.send({ type: 'respawn_self' });
+  }
+
   restartLevel(): void {
     this.send({ type: 'restart_level' });
   }

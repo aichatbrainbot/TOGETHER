@@ -124,6 +124,11 @@ export const LEVEL_SPECIAL_S1: LevelDefinition = {
   movingPlatforms: [],
   crates: [],
   keys: [],
+  coins: [
+    { id: 's1_c1', x: 298, y: 290 },
+    { id: 's1_c2', x: 578, y: 220 },
+    { id: 's1_c3', x: 336, y: 100 },
+  ],
   lockedGates: [],
   exitDoor: { x: 52, y: 100, w: 44, h: 48 },
   requiresVaultSwitches: false,
@@ -248,12 +253,13 @@ export const LEVEL_SPECIAL_S2: LevelDefinition = {
     },
     {
       id: 's2_l1_lock',
-      label: 'L1 LOCK',
+      label: '2P LOCK',
       kind: 'latch',
       accent: 'mint',
-      x: 398,
+      requiredPlayers: 2,
+      x: 396,
       y: 360,
-      w: 36,
+      w: 42,
       h: 8,
     },
     {
@@ -324,6 +330,11 @@ export const LEVEL_SPECIAL_S2: LevelDefinition = {
       unlocksGateId: 'gate_s2',
       accent: 'gold',
     },
+  ],
+  coins: [
+    { id: 's2_c1', x: 128, y: 158 },
+    { id: 's2_c2', x: 392, y: 162 },
+    { id: 's2_c3', x: 572, y: 318 },
   ],
   lockedGates: [
     {
@@ -520,6 +531,11 @@ export const LEVEL_SPECIAL_S3: LevelDefinition = {
       accent: 'gold',
     },
   ],
+  coins: [
+    { id: 's3_c1', x: 64, y: 206 },
+    { id: 's3_c2', x: 252, y: 196 },
+    { id: 's3_c3', x: 528, y: 332 },
+  ],
   lockedGates: [
     {
       id: 'gate_s3',
@@ -705,6 +721,11 @@ export const LEVEL_SPECIAL_S4: LevelDefinition = {
       unlocksGateId: 'gate_s4',
       accent: 'gold',
     },
+  ],
+  coins: [
+    { id: 's4_c1', x: 112, y: 244 },
+    { id: 's4_c2', x: 422, y: 184 },
+    { id: 's4_c3', x: 608, y: 318 },
   ],
   lockedGates: [
     {

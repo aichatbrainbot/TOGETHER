@@ -456,5 +456,25 @@ describe('Discord Activity Multiplayer Server Integration', () => {
       }
     }
     expect(aliceSawBobMove).toBe(true);
+
+    // Non-host Bob cannot force full stage restart (prevents griefing!)
+    bob.send({ type: 'restart_level' });
+    let notHostErr = await bob.nextMessage();
+    while (notHostErr.type === 'game_snapshot') {
+      notHostErr = await bob.nextMessage();
+    }
+    expect(notHostErr).toMatchObject({ type: 'error', code: 'NOT_HOST' });
+
+    // Any player CAN respawn just themselves cleanly to checkpoint (Key C)
+    bob.send({ type: 'respawn_self' });
+    let sawRespawn = false;
+    for (let i = 0; i < 15; i += 1) {
+      const m = await bob.nextMessage();
+      if (m.type === 'game_snapshot' && m.events.some((e) => e.type === 'respawn')) {
+        sawRespawn = true;
+        break;
+      }
+    }
+    expect(sawRespawn).toBe(true);
   });
 });

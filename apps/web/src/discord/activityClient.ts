@@ -22,6 +22,7 @@ export interface ActivitySessionContext {
   onParticipantsUpdate: (cb: (participants: DiscordUserSummary[]) => void) => () => void;
   onLayoutModeUpdate: (cb: (layoutMode: number) => void) => () => void;
   setLandscapeOrientation: (locked: boolean) => void;
+  openInviteDialog: () => Promise<boolean>;
   cleanup: () => void;
 }
 
@@ -222,6 +223,15 @@ export async function bootstrapDiscordActivity(
         .setOrientationLockState({ lock_state: lockState })
         .catch(() => {});
     },
+    async openInviteDialog() {
+      if (!discordSdk.guildId) return false;
+      try {
+        await discordSdk.commands.openInviteDialog();
+        return true;
+      } catch {
+        return false;
+      }
+    },
     cleanup() {
       if (platform === 'mobile') {
         void discordSdk.commands
@@ -296,6 +306,7 @@ async function bootstrapLocalDevPreview(
     onParticipantsUpdate: () => () => {},
     onLayoutModeUpdate: () => () => {},
     setLandscapeOrientation: () => {},
+    openInviteDialog: async () => false,
     cleanup: () => {},
   };
 }

@@ -29,6 +29,14 @@ function formatTime(): string {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function countCollectedCoins(w: GameWorldState): number {
+  let n = 0;
+  for (const c of w.coins ?? []) {
+    if (c.collected) n += 1;
+  }
+  return n;
+}
+
 function shouldSyncReactWorld(prev: GameWorldState | null, next: GameWorldState): boolean {
   if (!prev) return true;
   if (prev.levelId !== next.levelId) return true;
@@ -38,6 +46,13 @@ function shouldSyncReactWorld(prev: GameWorldState | null, next: GameWorldState)
   if (prev.respawnCount !== next.respawnCount) return true;
   if (prev.soloPractice !== next.soloPractice) return true;
   if (prev.soloActiveId !== next.soloActiveId) return true;
+  if (Boolean(prev.soloFollow) !== Boolean(next.soloFollow)) return true;
+  if (prev.activeCheckpointId !== next.activeCheckpointId) return true;
+  if (prev.exitDoor.unlocked !== next.exitDoor.unlocked) return true;
+  if (countCollectedCoins(prev) !== countCollectedCoins(next)) return true;
+  if (prev.keys.some((k, idx) => k.used !== next.keys[idx]?.used || k.carrierPlayerId !== next.keys[idx]?.carrierPlayerId)) {
+    return true;
+  }
   if (prev.players.length !== next.players.length) return true;
   let prevConn = 0;
   let nextConn = 0;
@@ -265,6 +280,14 @@ export function App() {
     socketRef.current?.swapSoloPuppet();
   }, []);
 
+  const handleToggleSoloFollow = useCallback(() => {
+    socketRef.current?.toggleSoloFollow();
+  }, []);
+
+  const handleRespawnSelf = useCallback(() => {
+    socketRef.current?.respawnSelf();
+  }, []);
+
   const handleRestartLevel = useCallback(() => {
     socketRef.current?.restartLevel();
   }, []);
@@ -391,6 +414,8 @@ export function App() {
           onSendInput={handleSendInput}
           onSendEmote={handleSendEmote}
           onSwapSolo={handleSwapSolo}
+          onToggleSoloFollow={handleToggleSoloFollow}
+          onRespawnSelf={handleRespawnSelf}
           onRestartLevel={handleRestartLevel}
           onStartNextLevel={handleStartNextLevel}
           onReturnLobby={handleReturnLobby}

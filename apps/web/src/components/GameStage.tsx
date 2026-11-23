@@ -35,7 +35,7 @@ export interface SnapshotBus {
 }
 
 interface GameStageProps {
-  /** Discrete UI state snapshot (updates ONLY on level/status/respawn/player-count changes, never 30x/sec) */
+  /** Discrete UI state snapshot (updates ONLY on level/status/respawn/objective changes, never 30x/sec) */
   world: GameWorldState;
   /** High-frequency 30 Hz authoritative snapshot bus bypassing React reconciliation completely */
   snapshotBus: SnapshotBus;
@@ -51,6 +51,8 @@ interface GameStageProps {
   onSendInput: (seq: number, buttons: number) => void;
   onSendEmote: (emote: EmotePingId) => void;
   onSwapSolo: () => void;
+  onToggleSoloFollow: () => void;
+  onRespawnSelf: () => void;
   onRestartLevel: () => void;
   onStartNextLevel: (nextLevelId: string, proceduralSeed?: number) => void;
   onReturnLobby: () => void;
@@ -79,6 +81,8 @@ export function GameStage({
   onSendInput,
   onSendEmote,
   onSwapSolo,
+  onToggleSoloFollow,
+  onRespawnSelf,
   onRestartLevel,
   onStartNextLevel,
   onReturnLobby,
@@ -104,6 +108,7 @@ export function GameStage({
   const visualErrRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const inputHistoryRef = useRef<Array<{ seq: number; buttons: number }>>([]);
   const sendStrideRef = useRef<number>(0);
+  const localJumpSfxAtRef = useRef<number>(0);
   const smoothPlatformsRef = useRef<MovingPlatformRuntimeState[]>([]);
   const smoothCratesRef = useRef<CrateRuntimeState[]>([]);
   const smoothKeysRef = useRef<KeyRuntimeState[]>([]);
@@ -142,18 +147,19 @@ export function GameStage({
   settingsRef.current = settings;
   emotesRef.current = emotesByPlayerId;
 
-  // Lock Discord mobile orientation to landscape during active gameplay
   useEffect(() => {
     onSetLandscape?.(true);
     return () => {
       onSetLandscape?.(false);
+      soundRef.current?.dispose();
     };
   }, [onSetLandscape]);
 
   useEffect(() => {
     soundRef.current?.setMuted(!settings.soundEnabled);
+    soundRef.current?.setMusicEnabled(settings.musicEnabled);
     soundRef.current?.setVolume(settings.volume);
-  }, [settings.soundEnabled, settings.volume]);
+  }, [settings.soundEnabled, settings.musicEnabled, settings.volume]);
 
   useEffect(() => {
     if (emoteSeq > lastEmoteSeqRef.current) {
@@ -168,6 +174,7 @@ export function GameStage({
     if (keys.has('ArrowLeft') || keys.has('KeyA')) bits |= INPUT_BITS.LEFT;
     if (keys.has('ArrowRight') || keys.has('KeyD')) bits |= INPUT_BITS.RIGHT;
     if (keys.has('ArrowUp') || keys.has('KeyW') || keys.has('Space')) bits |= INPUT_BITS.JUMP;
+    if (keys.has('ArrowDown') || keys.has('KeyS')) bits |= INPUT_BITS.DOWN;
     return bits;
   }, []);
 
@@ -210,9 +217,11 @@ export function GameStage({
       const oldControlledPose = poses.get(controlledId);
       const authControlled = nextWorld.players.find((p) => p.id === controlledId);
 
-      // Prune all client inputs already acknowledged by server
       if (hardReset) {
         inputHistoryRef.current.length = 0;
+        if (prevMeta.levelId !== nextWorld.levelId) {
+          rendererRef.current?.resetEffects();
+        }
       } else if (authControlled) {
         const ackSeq = authControlled.lastProcessedSeq;
         let dropCount = 0;
@@ -227,7 +236,6 @@ export function GameStage({
         }
       }
 
-      // Replay ONLY exact historical unacknowledged inputs (zero wrong-button rubber-banding!)
       const reconciled = cloneGameWorld(nextWorld);
       if (!hardReset && nextWorld.status === 'playing' && inputHistoryRef.current.length > 0) {
         const replayCount = Math.min(12, inputHistoryRef.current.length);
@@ -294,9 +302,14 @@ export function GameStage({
       }
 
       if (events.length > 0) {
-        rendererRef.current?.spawnEventParticles(events);
+        const recentLocalJump = Date.now() - localJumpSfxAtRef.current < 350;
+        rendererRef.current?.spawnEventParticles(
+          events,
+          recentLocalJump ? controlledId : undefined,
+        );
         const playedTypes = new Set<SimEvent['type']>();
         for (const ev of events) {
+          if (ev.type === 'jump' && recentLocalJump && ev.playerId === controlledId) continue;
           if (!playedTypes.has(ev.type)) {
             playedTypes.add(ev.type);
             soundRef.current?.play(ev.type);
@@ -305,7 +318,6 @@ export function GameStage({
       }
     };
 
-    // Initialize smoothly with current snapshot on mount
     const current = snapshotBus.getLatest();
     if (current) {
       handleSnapshot(current, []);
@@ -314,7 +326,6 @@ export function GameStage({
     return snapshotBus.subscribe(handleSnapshot);
   }, [snapshotBus, localUserId]);
 
-  // True edge-to-edge full-screen canvas sizing (capped DPR <= 1.5 + opaque alpha:false for 60 FPS inside Discord)
   useEffect(() => {
     const container = stageRef.current;
     const canvas = canvasRef.current;
@@ -344,7 +355,6 @@ export function GameStage({
     };
   }, []);
 
-  // Discord-safe Cinema Mode expansion (plus native fullscreen fallback ONLY outside Discord)
   const toggleCinemaExpand = useCallback(() => {
     const nextCinema = !settingsRef.current.cinemaMode;
     onUpdateSettings({ cinemaMode: nextCinema });
@@ -358,7 +368,7 @@ export function GameStage({
     }
   }, [mode, onUpdateSettings]);
 
-  // Keyboard controls, emote hotkeys (1-4), F Cinema Mode, Esc pause overlay, blur safety release
+  // Keyboard controls: WASD/Arrows/Space + S/Down Drop-Through, F Cinema, C Respawn Self, Q Solo Follow, Host R Restart
   useEffect(() => {
     const preventKeys = new Set([
       'ArrowLeft',
@@ -407,7 +417,15 @@ export function GameStage({
         onSwapSolo();
         return;
       }
-      if (e.code === 'KeyR') {
+      if (e.code === 'KeyQ' && latestWorldRef.current.soloPractice) {
+        onToggleSoloFollow();
+        return;
+      }
+      if (e.code === 'KeyC') {
+        onRespawnSelf();
+        return;
+      }
+      if (e.code === 'KeyR' && isHost) {
         onRestartLevel();
         return;
       }
@@ -438,9 +456,19 @@ export function GameStage({
       window.removeEventListener('blur', onBlur);
       onSendInput(seqRef.current + 1, 0);
     };
-  }, [flushInputImmediate, onRestartLevel, onSendEmote, onSendInput, onSwapSolo, toggleCinemaExpand]);
+  }, [
+    flushInputImmediate,
+    isHost,
+    onRespawnSelf,
+    onRestartLevel,
+    onSendEmote,
+    onSendInput,
+    onSwapSolo,
+    onToggleSoloFollow,
+    toggleCinemaExpand,
+  ]);
 
-  // Locked 60 FPS animation loop + tick-stamped client prediction + 60 FPS entity smoothing + direct DOM timer
+  // Locked 60 FPS animation loop + client-side prediction + instant local Jump feedback + 60 FPS smoothing
   useEffect(() => {
     let rafId = 0;
     let lastTime = performance.now();
@@ -461,13 +489,16 @@ export function GameStage({
 
       let gBits = 0;
       const axisX = pad.axes[0] ?? 0;
+      const axisY = pad.axes[1] ?? 0;
       const dpadLeft = pad.buttons[14]?.pressed ?? false;
       const dpadRight = pad.buttons[15]?.pressed ?? false;
+      const dpadDown = pad.buttons[13]?.pressed ?? false;
       const jumpPressed = (pad.buttons[0]?.pressed ?? false) || (pad.buttons[1]?.pressed ?? false);
       const swapPressed = pad.buttons[3]?.pressed ?? false;
 
       if (axisX < -0.35 || dpadLeft) gBits |= INPUT_BITS.LEFT;
       if (axisX > 0.35 || dpadRight) gBits |= INPUT_BITS.RIGHT;
+      if (axisY > 0.45 || dpadDown) gBits |= INPUT_BITS.DOWN;
       if (jumpPressed) gBits |= INPUT_BITS.JUMP;
 
       if (swapPressed && !prevGamepadSwapRef.current && latestWorldRef.current.soloPractice) {
@@ -494,7 +525,6 @@ export function GameStage({
         ? (currentWorld.soloActiveId ?? localUserId)
         : localUserId;
 
-      // 1. Deterministic 60 Hz local prediction with tick-stamped input history
       if (predWorld && predWorld.status === 'playing' && currentWorld.status === 'playing') {
         predAccumRef.current = Math.min(predAccumRef.current + dtSec, PHYSICS.DT * 3);
         const curBits = computeButtons();
@@ -507,9 +537,22 @@ export function GameStage({
             inputHistoryRef.current.splice(0, inputHistoryRef.current.length - 48);
           }
 
-          stepGameWorld(predWorld, { [controlledId]: { buttons: curBits, seq } }, level);
+          const stepEvents = stepGameWorld(
+            predWorld,
+            { [controlledId]: { buttons: curBits, seq } },
+            level,
+          );
+          for (const ev of stepEvents) {
+            if (ev.type === 'jump' && ev.playerId === controlledId) {
+              const ms = Date.now();
+              if (ms - localJumpSfxAtRef.current > 120) {
+                localJumpSfxAtRef.current = ms;
+                soundRef.current?.play('jump');
+                rendererRef.current?.spawnLocalJumpEffect(ev.x, ev.y, ev.color ?? '#54D6C5');
+              }
+            }
+          }
 
-          // Keep server lastProcessedSeq fresh while moving (30 Hz) without idle traffic
           sendStrideRef.current += 1;
           if (curBits !== lastSentBitsRef.current) {
             lastSentBitsRef.current = curBits;
@@ -520,14 +563,12 @@ export function GameStage({
         }
       }
 
-      // 2. Smoothly absorb any tiny reconciliation delta (no abrupt snaps!)
       const errDecay = Math.exp(-18 * dtSec);
       visualErrRef.current.x *= errDecay;
       visualErrRef.current.y *= errDecay;
       if (Math.abs(visualErrRef.current.x) < 0.08) visualErrRef.current.x = 0;
       if (Math.abs(visualErrRef.current.y) < 0.08) visualErrRef.current.y = 0;
 
-      // 3. Smooth 60 FPS poses (local predicted + remote exponentially interpolated)
       const poses = posesRef.current;
       const remoteSmooth = 1 - Math.exp(-22 * dtSec);
       const predControlled = predWorld?.players.find((p) => p.id === controlledId);
@@ -565,7 +606,6 @@ export function GameStage({
         }
       }
 
-      // 4. Smooth 60 FPS moving platforms, crates & keys (eliminates 30 Hz entity judder!)
       const entitySmooth = 1 - Math.exp(-24 * dtSec);
       const targetPlatforms =
         predWorld && predWorld.levelId === currentWorld.levelId
@@ -628,7 +668,6 @@ export function GameStage({
         }
       }
 
-      // 5. Direct DOM timer update (ZERO React re-renders during gameplay!)
       const displayTimeMs = currentWorld.completionTimeMs ?? currentWorld.elapsedMs;
       const nextHudText = formatTimer(displayTimeMs);
       if (nextHudText !== lastHudText) {
@@ -645,7 +684,6 @@ export function GameStage({
         }
       }
 
-      // 6. Fast cached Canvas2D render (0 shadowBlur, 1 static-layer blit, 60 FPS entities)
       const canvas = canvasRef.current;
       if (canvas) {
         const ctx = canvas.getContext('2d', { alpha: false });
@@ -705,6 +743,10 @@ export function GameStage({
       ? Math.max(0, activeLevel.parTimeMs.gold - displayTimeMs)
       : null;
 
+  const totalCoins = activeLevel.coins?.length ?? world.coins?.length ?? 0;
+  const collectedCoins = (world.coins ?? []).filter((c) => c.collected).length;
+  const remainingKeys = world.keys.filter((k) => !k.used).length;
+
   return (
     <section ref={stageRef} className="game-stage-fullscreen">
       <canvas
@@ -713,7 +755,7 @@ export function GameStage({
         aria-label={`TOGETHER? ${activeLevel.name} ${activeLevel.title}`}
       />
 
-      {/* Translucent Floating Top HUD (auto-compacts in Cinema Mode) */}
+      {/* Translucent Floating Top HUD */}
       <div className={`floating-hud ${settings.cinemaMode ? 'floating-hud-cinema' : ''}`}>
         <div className="hud-cluster">
           <span
@@ -739,7 +781,7 @@ export function GameStage({
           )}
           {world.modifier !== 'standard' && (
             <span className="pill pill-mint">
-              {world.modifier === 'low_gravity' ? 'LOW-G' : 'SPEED RUN'}
+              {world.modifier === 'low_gravity' ? 'CHAOS · UNRANKED' : 'SPEED RUN'}
             </span>
           )}
           <span className="hud-stat">
@@ -750,9 +792,17 @@ export function GameStage({
               Par <code ref={parCodeRef}>{formatTimer(goldParRemaining)}</code>
             </span>
           )}
-          {!settings.cinemaMode && (
-            <span className="hud-stat hud-respawns">
-              Falls <code>{world.respawnCount}</code>
+          {totalCoins > 0 && (
+            <span className="hud-coin-pill" title="DarkCoins collected in this stage">
+              <span className="coin-dot" />
+              <code>
+                {collectedCoins}/{totalCoins}
+              </code>
+            </span>
+          )}
+          {!settings.cinemaMode && world.keys.length > 0 && (
+            <span className="hud-stat">
+              {remainingKeys > 0 ? 'Key Needed' : 'Gate Open'}
             </span>
           )}
           {!settings.cinemaMode && pingMs !== null && (
@@ -764,14 +814,24 @@ export function GameStage({
 
         <div className="hud-cluster">
           {world.soloPractice && (
-            <button
-              type="button"
-              className="hud-btn hud-btn-accent"
-              onClick={onSwapSolo}
-              title="Swap control between P1 and Solo Partner (Tab)"
-            >
-              Swap {controlledPlayer?.badge ?? 'P1'} [Tab]
-            </button>
+            <>
+              <button
+                type="button"
+                className="hud-btn hud-btn-accent"
+                onClick={onSwapSolo}
+                title="Swap control between P1 and Solo Partner (Tab)"
+              >
+                Swap {controlledPlayer?.badge ?? 'P1'} [Tab]
+              </button>
+              <button
+                type="button"
+                className={`hud-btn ${world.soloFollow ? 'hud-btn-active' : ''}`}
+                onClick={onToggleSoloFollow}
+                title="Toggle Partner Follow Mode (Q)"
+              >
+                {world.soloFollow ? 'Following [Q]' : 'Follow [Q]'}
+              </button>
+            </>
           )}
           {!settings.cinemaMode && (
             <button
@@ -815,12 +875,22 @@ export function GameStage({
           <button
             type="button"
             className="hud-btn"
-            onClick={onRestartLevel}
-            title="Restart level (R)"
+            onClick={onRespawnSelf}
+            title="Respawn yourself to active Checkpoint (C)"
           >
-            <RestartIcon />
-            {!settings.cinemaMode && <span>Restart</span>}
+            CP [C]
           </button>
+          {isHost && (
+            <button
+              type="button"
+              className="hud-btn"
+              onClick={onRestartLevel}
+              title="Host: Restart full stage (R)"
+            >
+              <RestartIcon />
+              {!settings.cinemaMode && <span>Restart</span>}
+            </button>
+          )}
           {isHost && (
             <button type="button" className="hud-btn" onClick={onReturnLobby}>
               Menu
@@ -838,22 +908,27 @@ export function GameStage({
                 <code>A/D</code> Move
               </span>
               <span>
-                <code>Space</code> Jump &amp; Stack
+                <code>Space</code> Jump
+              </span>
+              <span>
+                <code>S</code> Drop
               </span>
               {world.soloPractice && (
                 <span>
-                  <code>Tab</code> Swap
+                  <code>Tab</code> Swap · <code>Q</code> Follow
                 </span>
               )}
               <span>
+                <code>C</code> Checkpoint
+              </span>
+              <span>
                 <code>F</code> Cinema
               </span>
-              <span>
-                <code>R</code> Restart
-              </span>
-              <span>
-                <code>Esc</code> Options
-              </span>
+              {isHost && (
+                <span>
+                  <code>R</code> Restart
+                </span>
+              )}
             </div>
 
             <div className="emote-bar" aria-label="Quick Emote Pings">
@@ -900,6 +975,20 @@ export function GameStage({
               onPointerCancel={() => setTouchBit(INPUT_BITS.RIGHT, false)}
             >
               ▶
+            </button>
+            <button
+              type="button"
+              className="touch-btn"
+              title="Drop through platform"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                setTouchBit(INPUT_BITS.DOWN, true);
+              }}
+              onPointerUp={() => setTouchBit(INPUT_BITS.DOWN, false)}
+              onPointerLeave={() => setTouchBit(INPUT_BITS.DOWN, false)}
+              onPointerCancel={() => setTouchBit(INPUT_BITS.DOWN, false)}
+            >
+              ▼
             </button>
           </div>
           <div className="touch-pad-right">
@@ -970,6 +1059,15 @@ export function GameStage({
                   onChange={(e) => onUpdateSettings({ soundEnabled: e.target.checked })}
                 />
               </label>
+              <label className="setting-row surface">
+                <span>Ambient Synth Music</span>
+                <input
+                  type="checkbox"
+                  checked={settings.musicEnabled}
+                  disabled={!settings.soundEnabled}
+                  onChange={(e) => onUpdateSettings({ musicEnabled: e.target.checked })}
+                />
+              </label>
               <label className="setting-row surface setting-row-col">
                 <div className="setting-row-top">
                   <span>Volume</span>
@@ -1034,21 +1132,29 @@ export function GameStage({
         </div>
       )}
 
-      {/* Chamber Cleared Victory Overlay with Medals & Next Stage Progression */}
+      {/* Chamber Cleared Victory Overlay with Medals, DarkCoins & Next Stage Progression */}
       {world.status === 'completed' && (
         <div className="victory-overlay">
           <div className="panel victory-card">
             <span className={`pill pill-medal-${world.medal ?? 'bronze'}`}>
-              {(world.medal ?? 'bronze').toUpperCase()} MEDAL · {activeLevel.name}
+              {world.modifier === 'low_gravity'
+                ? `CHAOS CLEAR (UNRANKED) · ${activeLevel.name}`
+                : `${(world.medal ?? 'bronze').toUpperCase()} MEDAL · ${activeLevel.name}`}
             </span>
             <h2 className="victory-title">TOGETHER!</h2>
             <p className="victory-subtitle">
               {activeLevel.title} cleared! Gold par: {formatTimer(activeLevel.parTimeMs.gold)}
             </p>
-            <div className="victory-stats">
+            <div className="victory-stats victory-stats-3">
               <div className="surface stat-tile">
-                <span className="muted-label">Clear Time</span>
+                <span className="muted-label">Time</span>
                 <strong>{formatTimer(world.completionTimeMs ?? world.elapsedMs)}</strong>
+              </div>
+              <div className="surface stat-tile">
+                <span className="muted-label">DarkCoins</span>
+                <strong>
+                  {collectedCoins}/{totalCoins}
+                </strong>
               </div>
               <div className="surface stat-tile">
                 <span className="muted-label">Falls</span>
@@ -1056,6 +1162,11 @@ export function GameStage({
               </div>
             </div>
             <div className="victory-actions">
+              {!isHost && (
+                <p className="muted-note" style={{ width: '100%', textAlign: 'center' }}>
+                  Waiting for Host to launch next stage or return to menu...
+                </p>
+              )}
               {isHost && nextCampaignId && (
                 <button
                   type="button"
@@ -1077,13 +1188,15 @@ export function GameStage({
                   New Seed →
                 </button>
               )}
-              <button
-                type="button"
-                className={`btn ${isHost && (nextCampaignId || isProcedural) ? 'btn-secondary' : 'btn-primary'}`}
-                onClick={onRestartLevel}
-              >
-                Replay
-              </button>
+              {isHost && (
+                <button
+                  type="button"
+                  className={`btn ${nextCampaignId || isProcedural ? 'btn-secondary' : 'btn-primary'}`}
+                  onClick={onRestartLevel}
+                >
+                  Replay
+                </button>
+              )}
               {isHost && (
                 <button type="button" className="btn btn-secondary" onClick={onReturnLobby}>
                   Menu

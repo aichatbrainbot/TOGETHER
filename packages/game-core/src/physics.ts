@@ -6,6 +6,7 @@ import {
 } from './levels/index.js';
 import {
   type BridgeRuntimeState,
+  type CoinRuntimeState,
   type CrateRuntimeState,
   type CrumbleRuntimeState,
   type GameWorldState,
@@ -86,6 +87,95 @@ function getRespawnPoint(
   return getSpawnPositionForSlot(level, slot);
 }
 
+export function respawnPlayerAtCheckpoint(
+  level: LevelDefinition,
+  world: GameWorldState,
+  player: SimPlayerState,
+): SimEvent {
+  const spawn = getRespawnPoint(level, world, player.slot);
+  const event: SimEvent = {
+    type: 'respawn',
+    x: player.x + PHYSICS.PLAYER_WIDTH / 2,
+    y: Math.min(player.y + PHYSICS.PLAYER_HEIGHT / 2, level.height - 16),
+    color: player.color,
+    playerId: player.id,
+  };
+  player.x = spawn.x;
+  player.y = spawn.y;
+  player.vx = 0;
+  player.vy = 0;
+  player.grounded = false;
+  player.standingOnId = null;
+  player.standingOnPlatformId = null;
+  player.standingOnCrateId = null;
+  player.invulnTicks = PHYSICS.RESPAWN_INVULN_TICKS;
+
+  for (let kIdx = 0; kIdx < world.keys.length; kIdx += 1) {
+    const k = world.keys[kIdx]!;
+    if (k.carrierPlayerId === player.id && !k.used) {
+      const def = level.keys[kIdx]!;
+      k.carrierPlayerId = null;
+      k.x = def.x;
+      k.y = def.y;
+    }
+  }
+  return event;
+}
+
+/**
+ * Pure deterministic solo-partner follow steering (zero AI): walks toward active partner
+ * along solid ground while automatically stopping before ledges/hazards.
+ */
+export function computeSoloFollowButtons(
+  world: GameWorldState,
+  level: LevelDefinition,
+  followerId: string,
+  leaderId: string,
+): number {
+  const follower = world.players.find((p) => p.id === followerId);
+  const leader = world.players.find((p) => p.id === leaderId);
+  if (!follower || !leader) return 0;
+
+  const dx = leader.x - follower.x;
+  if (Math.abs(dx) < 28) return 0;
+
+  const stepDir = dx > 0 ? 1 : -1;
+  if (follower.grounded) {
+    // Probe 14px ahead beneath feet to avoid walking blindly into pits
+    const probeX =
+      stepDir > 0
+        ? follower.x + PHYSICS.PLAYER_WIDTH + 10
+        : follower.x - 10;
+    const probeFoot: Rect = {
+      x: probeX - 3,
+      y: follower.y + PHYSICS.PLAYER_HEIGHT + 2,
+      w: 6,
+      h: 10,
+    };
+    const hasSolidFloor =
+      level.solids.some((s) => rectsOverlap(probeFoot, s)) ||
+      (level.oneWayPlatforms ?? []).some((o) => rectsOverlap(probeFoot, o)) ||
+      level.bridges.some((b, idx) => world.bridges[idx]?.active && rectsOverlap(probeFoot, b)) ||
+      world.movingPlatforms.some((mp) => rectsOverlap(probeFoot, mp));
+
+    if (!hasSolidFloor) return 0;
+
+    // Stop cleanly before active lasers
+    const probeBody: Rect = {
+      x: probeX - 6,
+      y: follower.y,
+      w: 12,
+      h: PHYSICS.PLAYER_HEIGHT,
+    };
+    const laserAhead = (level.lasers ?? []).some(
+      (l, idx) => world.lasers[idx]?.active && rectsOverlap(probeBody, l),
+    );
+    if (laserAhead) return 0;
+  }
+
+  return stepDir > 0 ? INPUT_BITS.RIGHT : INPUT_BITS.LEFT;
+}
+
 export function createPlayerEntity(level: LevelDefinition, seed: SimPlayerSeed): SimPlayerState {
   const palette = getPaletteForSlot(seed.slot);
   const spawn = getSpawnPositionForSlot(level, seed.slot);
@@ -108,6 +198,7 @@ export function createPlayerEntity(level: LevelDefinition, seed: SimPlayerSeed):
     standingOnCrateId: null,
     coyoteTicks: 0,
     jumpBufferTicks: 0,
+    dropThroughTicks: 0,
     prevJumpDown: false,
     invulnTicks: 0,
     atExit: false,
@@ -197,6 +288,13 @@ export function createGameWorld(
     used: false,
   }));
 
+  const coins: CoinRuntimeState[] = (level.coins ?? []).map((c) => ({
+    id: c.id,
+    x: c.x,
+    y: c.y,
+    collected: false,
+  }));
+
   const lockedGates: LockedGateRuntimeState[] = level.lockedGates.map((g) => ({
     id: g.id,
     unlocked: false,
@@ -210,6 +308,7 @@ export function createGameWorld(
     elapsedMs: 0,
     soloPractice,
     soloActiveId: soloPractice ? (players[0]?.id ?? null) : null,
+    soloFollow: false,
     status: 'playing',
     completionTimeMs: null,
     medal: null,
@@ -222,6 +321,8 @@ export function createGameWorld(
       latched: false,
       remainingTicks: 0,
       maxTicks: sw.durationTicks ?? 0,
+      pressers: 0,
+      requiredPressers: sw.requiredPlayers ?? 1,
     })),
     bridges: level.bridges.map((br) => ({
       id: br.id,
@@ -235,6 +336,7 @@ export function createGameWorld(
     lasers,
     crates,
     keys,
+    coins,
     lockedGates,
     exitDoor: {
       unlocked: !level.requiresVaultSwitches,
@@ -259,6 +361,7 @@ export function cloneGameWorld(world: GameWorldState): GameWorldState {
     lasers: world.lasers.map((l) => ({ ...l })),
     crates: world.crates.map((c) => ({ ...c })),
     keys: world.keys.map((k) => ({ ...k })),
+    coins: (world.coins ?? []).map((c) => ({ ...c })),
     lockedGates: world.lockedGates.map((g) => ({ ...g })),
     exitDoor: { ...world.exitDoor },
     contributions: Object.fromEntries(
@@ -405,6 +508,12 @@ export function stepGameWorld(
     }
   }
 
+  // Track crate X before moving platforms so riders on crate-on-platform carry full delta
+  const crateStartXById = new Map<string, number>();
+  for (const cr of world.crates) {
+    crateStartXById.set(cr.id, cr.x);
+  }
+
   // 2. Advance Moving Platforms & carry riding players and crates first
   for (let i = 0; i < level.movingPlatforms.length; i += 1) {
     const def = level.movingPlatforms[i]!;
@@ -465,9 +574,27 @@ export function stepGameWorld(
     const moveLeft = (buttons & INPUT_BITS.LEFT) !== 0;
     const moveRight = (buttons & INPUT_BITS.RIGHT) !== 0;
     const jumpDown = (buttons & INPUT_BITS.JUMP) !== 0;
+    const dropDown = (buttons & INPUT_BITS.DOWN) !== 0;
     const jumpJustPressed = jumpDown && !p.prevJumpDown;
     const jumpJustReleased = !jumpDown && p.prevJumpDown;
     p.prevJumpDown = jumpDown;
+
+    if ((p.dropThroughTicks ?? 0) > 0) {
+      p.dropThroughTicks = (p.dropThroughTicks ?? 0) - 1;
+    }
+    if (dropDown && p.grounded && !jumpDown && (level.oneWayPlatforms?.length ?? 0) > 0) {
+      const footProbe: Rect = {
+        x: p.x + 2,
+        y: p.y + PHYSICS.PLAYER_HEIGHT - 1,
+        w: PHYSICS.PLAYER_WIDTH - 4,
+        h: 4,
+      };
+      if (level.oneWayPlatforms!.some((ow) => rectsOverlap(footProbe, ow))) {
+        p.dropThroughTicks = PHYSICS.DROP_THROUGH_TICKS;
+        p.grounded = false;
+        p.vy = Math.max(p.vy, 65);
+      }
+    }
 
     const dir = (moveRight ? 1 : 0) - (moveLeft ? 1 : 0);
     intendedDirByPlayer.set(p.id, dir);
@@ -528,14 +655,16 @@ export function stepGameWorld(
     p.vy = Math.min(PHYSICS.MAX_FALL_SPEED, p.vy + effectiveGravity * dt);
   }
 
-  // 4. Cooperative Pushable Crates (x1 and x2 pushers)
+  // 4. Cooperative Pushable Crates: direct contact (<= 6 px) + lined-up shoulder-to-shoulder pushers
   const crateDeltaX = new Map<string, number>();
   for (let i = 0; i < world.crates.length; i += 1) {
     const crate = world.crates[i]!;
-    const startCrateX = crate.x;
+    const frameStartX = crateStartXById.get(crate.id) ?? crate.x;
 
-    let pushRight = 0;
-    let pushLeft = 0;
+    let directRight = 0;
+    let assistRight = 0;
+    let directLeft = 0;
+    let assistLeft = 0;
 
     for (const p of activePlayers) {
       const dir = intendedDirByPlayer.get(p.id) ?? 0;
@@ -545,16 +674,23 @@ export function stepGameWorld(
         Math.min(p.y + PHYSICS.PLAYER_HEIGHT, crate.y + crate.h) - Math.max(p.y, crate.y);
       if (verticalOverlap < 6) continue;
 
-      if (dir > 0 && p.x + PHYSICS.PLAYER_WIDTH >= crate.x - 24 && p.x < crate.x + crate.w / 2) {
-        pushRight += 1;
-      } else if (
-        dir < 0 &&
-        p.x <= crate.x + crate.w + 24 &&
-        p.x + PHYSICS.PLAYER_WIDTH > crate.x + crate.w / 2
-      ) {
-        pushLeft += 1;
+      if (dir > 0 && p.x < crate.x + crate.w / 2) {
+        if (p.x + PHYSICS.PLAYER_WIDTH >= crate.x - 6) {
+          directRight += 1;
+        } else if (p.x + PHYSICS.PLAYER_WIDTH >= crate.x - (PHYSICS.PLAYER_WIDTH + 10)) {
+          assistRight += 1;
+        }
+      } else if (dir < 0 && p.x + PHYSICS.PLAYER_WIDTH > crate.x + crate.w / 2) {
+        if (p.x <= crate.x + crate.w + 6) {
+          directLeft += 1;
+        } else if (p.x <= crate.x + crate.w + (PHYSICS.PLAYER_WIDTH + 10)) {
+          assistLeft += 1;
+        }
       }
     }
+
+    const pushRight = directRight > 0 ? directRight + assistRight : 0;
+    const pushLeft = directLeft > 0 ? directLeft + assistLeft : 0;
 
     const effectiveReq = world.soloPractice ? 1 : crate.requiredPushers;
     crate.activePushers = Math.max(pushRight, pushLeft);
@@ -578,7 +714,7 @@ export function stepGameWorld(
       crate.x = cBoxX.x;
       crate.vx = 0;
     }
-    crateDeltaX.set(crate.id, crate.x - startCrateX);
+    crateDeltaX.set(crate.id, crate.x - frameStartX);
 
     const prevBottom = crate.y + crate.h;
     crate.grounded = false;
@@ -586,7 +722,7 @@ export function stepGameWorld(
     crate.y += crate.vy * dt;
     const cBoxY = crateRect(crate);
 
-    for (const solid of staticSolids) {
+    for (const solid of [...staticSolids, ...otherCrates]) {
       if (!rectsOverlap(cBoxY, solid)) continue;
       if (crate.vy >= 0 && prevBottom <= solid.y + 10) {
         crate.y = solid.y - crate.h;
@@ -725,8 +861,8 @@ export function stepGameWorld(
       box.y = p.y;
     }
 
-    // 7b. One-way platforms (jump up through freely, land solidly from above!)
-    if (p.vy >= 0) {
+    // 7b. One-way platforms (jump up through freely, press S/Down to drop, or land solidly from above!)
+    if (p.vy >= 0 && (p.dropThroughTicks ?? 0) === 0) {
       for (const ow of oneWays) {
         if (rectsOverlap(box, ow) && prevBottom <= ow.y + 8) {
           p.y = ow.y - PHYSICS.PLAYER_HEIGHT;
@@ -878,36 +1014,9 @@ export function stepGameWorld(
       laserDefs.some((ld, idx) => world.lasers[idx]?.active && rectsOverlap(box, ld));
 
     if (fellOut || hitHazard || hitLaser) {
-      const spawn = getRespawnPoint(level, world, p.slot);
-      events.push({
-        type: 'respawn',
-        x: p.x + PHYSICS.PLAYER_WIDTH / 2,
-        y: Math.min(p.y + PHYSICS.PLAYER_HEIGHT / 2, level.height - 16),
-        color: p.color,
-        playerId: p.id,
-      });
-      p.x = spawn.x;
-      p.y = spawn.y;
-      p.vx = 0;
-      p.vy = 0;
-      p.grounded = false;
-      p.standingOnId = null;
-      p.standingOnPlatformId = null;
-      p.standingOnCrateId = null;
-      p.invulnTicks = PHYSICS.RESPAWN_INVULN_TICKS;
+      events.push(respawnPlayerAtCheckpoint(level, world, p));
       world.respawnCount += 1;
       ensureContribution(world, p.id).respawns += 1;
-
-      // Return any carried key cleanly back to spawn
-      for (let kIdx = 0; kIdx < world.keys.length; kIdx += 1) {
-        const k = world.keys[kIdx]!;
-        if (k.carrierPlayerId === p.id && !k.used) {
-          const def = level.keys[kIdx]!;
-          k.carrierPlayerId = null;
-          k.x = def.x;
-          k.y = def.y;
-        }
-      }
     }
   }
 
@@ -977,7 +1086,29 @@ export function stepGameWorld(
     }
   }
 
-  // 12. Switches (Hold, Latch, Timed, Vault)
+  // 11b. Optional DarkCoins / Collectibles (3 per stage for 100% mastery)
+  if (!world.coins && level.coins) {
+    world.coins = level.coins.map((c) => ({ id: c.id, x: c.x, y: c.y, collected: false }));
+  }
+  const coinList = world.coins ?? [];
+  for (let i = 0; i < coinList.length; i += 1) {
+    const coin = coinList[i]!;
+    if (coin.collected) continue;
+    const coinBox: Rect = { x: coin.x - 9, y: coin.y - 9, w: 18, h: 18 };
+    const collector = activePlayers.find((p) => rectsOverlap(playerRect(p), coinBox));
+    if (collector) {
+      coin.collected = true;
+      events.push({
+        type: 'coin_pickup',
+        x: coin.x,
+        y: coin.y,
+        color: '#FFE066',
+        playerId: collector.id,
+      });
+    }
+  }
+
+  // 12. Switches (Hold, Latch, Vault, Timed — including Co-op multi-player weight plates)
   for (let i = 0; i < level.switches.length; i += 1) {
     const def = level.switches[i]!;
     const state = world.switches[i]!;
@@ -991,12 +1122,21 @@ export function stepGameWorld(
     const wasPressed = state.pressed;
     const wasLatched = state.latched;
 
-    const triggeringPlayer = activePlayers.find((p) => rectsOverlap(playerRect(p), triggerZone));
+    const overlappingPlayers = activePlayers.filter((p) => rectsOverlap(playerRect(p), triggerZone));
+    const triggeringPlayer = overlappingPlayers[0];
     const crateAllowed = def.allowsCrate !== false;
     const cratePressing =
       crateAllowed && world.crates.some((c) => rectsOverlap(crateRect(c), triggerZone));
 
-    const nowPressed = Boolean(triggeringPlayer || cratePressing);
+    const effectiveRequired =
+      world.soloPractice || activePlayers.length <= 1
+        ? 1
+        : Math.min(def.requiredPlayers ?? 1, activePlayers.length);
+
+    state.pressers = overlappingPlayers.length + (cratePressing ? 1 : 0);
+    state.requiredPressers = effectiveRequired;
+
+    const nowPressed = state.pressers >= effectiveRequired;
     state.pressed = nowPressed;
 
     if (def.kind === 'latch' && nowPressed) {

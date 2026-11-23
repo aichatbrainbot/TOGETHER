@@ -21,9 +21,12 @@ import {
   CrownIcon,
   DiceIcon,
   InfoIcon,
+  InviteIcon,
   PlayIcon,
   SettingsIcon,
   SignalIcon,
+  SoundOffIcon,
+  SoundOnIcon,
   TogetherCrest,
   TrophyIcon,
   UsersIcon,
@@ -66,11 +69,6 @@ interface GameMenuProps {
 
 type ActivePanel = null | 'squad' | 'chambers' | 'leaderboard' | 'settings' | 'howto';
 
-function shortId(id: string): string {
-  if (id.length <= 16) return id;
-  return `${id.slice(0, 8)}…${id.slice(-6)}`;
-}
-
 function formatMs(ms: number): string {
   const totalSec = ms / 1000;
   const mins = Math.floor(totalSec / 60);
@@ -109,6 +107,7 @@ export function GameMenu({
   const isHost = Boolean(selfPlayer?.isHost);
   const isSolo = connectedPlayers.length <= 1;
   const hostPlayer = room?.players.find((p) => p.isHost);
+  const canInviteInDiscord = context.mode === 'discord' && Boolean(context.guildId);
 
   const selectedLevel = useMemo(
     () => resolveLevel(room?.selectedLevelId ?? 'chamber-01', room?.selectedSeed),
@@ -116,7 +115,21 @@ export function GameMenu({
   );
   const activeModifier: ChallengeModifier = room?.modifier ?? 'standard';
 
-  // Close drawer cleanly on Escape key
+  // Fetch player progression profile on mount so stage cards display medals, best times & DarkCoins
+  useEffect(() => {
+    let active = true;
+    const apiPrefix = context.mode === 'discord' ? '/.proxy/api' : '/api';
+    fetch(`${apiPrefix}/profile/${encodeURIComponent(context.user.id)}`)
+      .then((r) => (r.ok ? (r.json() as Promise<{ profile?: PlayerProfileStats | null }>) : { profile: null }))
+      .then((profRes) => {
+        if (active) setProfile(profRes.profile ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [context.mode, context.user.id, room?.sessionClears.length]);
+
   useEffect(() => {
     if (!activePanel) return;
     const onKey = (e: KeyboardEvent) => {
@@ -126,7 +139,6 @@ export function GameMenu({
     return () => window.removeEventListener('keydown', onKey);
   }, [activePanel]);
 
-  // Fetch real Leaderboard & Player Profile from server when Leaderboard drawer opens
   useEffect(() => {
     if (activePanel !== 'leaderboard') return;
     let active = true;
@@ -176,13 +188,17 @@ export function GameMenu({
   const renderStageCard = (lvl: LevelDefinition) => {
     const isSelected = selectedLevel.id === lvl.id;
     const isSpecial = lvl.tier === 'special';
+    const bestTime = profile?.bestTimesByLevel?.[lvl.id];
+    const bestMedal = profile?.bestMedalsByLevel?.[lvl.id];
+    const bestCoins = profile?.bestCoinsByLevel?.[lvl.id] ?? 0;
+    const totalCoins = lvl.coins?.length ?? 3;
+
     return (
       <div
         key={lvl.id}
         className={`chamber-card surface ${isSelected ? 'chamber-card-live' : ''} ${
           isSpecial ? 'chamber-card-special' : ''
         }`}
-        style={{ borderLeft: `3px solid ${lvl.themeAccent}` }}
       >
         <div className="chamber-card-head">
           <div className="chamber-title-group">
@@ -197,19 +213,30 @@ export function GameMenu({
             </span>
             <strong>{lvl.title}</strong>
           </div>
-          <span
-            className="difficulty-stars"
-            style={{ color: lvl.themeAccent }}
-            title={`Difficulty ${lvl.difficulty}/5`}
-          >
-            {renderDifficultyStars(lvl.difficulty)}
-          </span>
+          <div className="chamber-badges-right">
+            {bestMedal && (
+              <span className={`pill pill-medal-${bestMedal}`} title="Best Ranked Medal">
+                {bestMedal.toUpperCase()}
+              </span>
+            )}
+            <span
+              className="difficulty-stars"
+              style={{ color: lvl.themeAccent }}
+              title={`Difficulty ${lvl.difficulty}/5`}
+            >
+              {renderDifficultyStars(lvl.difficulty)}
+            </span>
+          </div>
         </div>
         <p className="muted-note">{lvl.subtitle}</p>
         <div className="chamber-card-foot">
           <div className="chamber-meta-tags">
             <span className="pill pill-accent">{lvl.mechanicTag}</span>
-            <span className="log-time">Par {formatMs(lvl.parTimeMs.gold)}</span>
+            <span className="log-time">
+              {bestTime !== undefined
+                ? `Best ${formatMs(bestTime)} · ${bestCoins}/${totalCoins} Coins`
+                : `Par ${formatMs(lvl.parTimeMs.gold)} · ${totalCoins} Coins`}
+            </span>
           </div>
           {isHost && (
             <div className="chamber-card-btns">
@@ -261,54 +288,75 @@ export function GameMenu({
         reducedMotion={settings.reducedMotion}
       />
 
-      {/* Top Overlay Header Bar */}
+      {/* Clean Top Overlay Header Bar (no technical debug IDs or duplicate drawer triggers) */}
       <header className="menu-topbar">
-        <div className="menu-top-pill" title={context.instanceId}>
-          <span className={`pill ${context.mode === 'discord' ? 'pill-accent' : 'pill-warning'}`}>
-            {context.mode === 'discord' ? 'DISCORD ACTIVITY' : 'LOCAL PREVIEW'}
-          </span>
-          <span className="top-pill-sub">
-            Instance <code>{shortId(context.instanceId)}</code>
-          </span>
+        <div className="menu-top-cluster">
+          <div className="menu-top-pill">
+            <span className={`pill ${context.mode === 'discord' ? 'pill-accent' : 'pill-warning'}`}>
+              {context.mode === 'discord' ? 'DISCORD ACTIVITY' : 'LOCAL PREVIEW'}
+            </span>
+            <span className="top-pill-sub">
+              Stage <strong>{selectedLevel.code}</strong> · {selectedLevel.title}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            className="menu-top-pill menu-icon-pill"
+            onClick={() => onUpdateSettings({ soundEnabled: !settings.soundEnabled })}
+            title={settings.soundEnabled ? 'Mute sound & music' : 'Unmute sound & music'}
+            aria-label={settings.soundEnabled ? 'Mute sound' : 'Unmute sound'}
+          >
+            {settings.soundEnabled ? <SoundOnIcon /> : <SoundOffIcon />}
+          </button>
         </div>
 
-        <button
-          type="button"
-          className="menu-top-pill menu-squad-pill"
-          onClick={() => setActivePanel(activePanel === 'squad' ? null : 'squad')}
-        >
-          <CrownIcon className="crown-accent" />
-          <div className="squad-pill-text">
-            <span className="squad-pill-label">
-              {hostPlayer ? `Host · ${hostPlayer.displayName}` : 'Connecting Squad'}
-            </span>
-            <span className="squad-pill-meta">
-              {connectedPlayers.length}/{room?.maxPlayers ?? 8} Online · {readyCount} Ready
-            </span>
+        <div className="menu-top-cluster">
+          {canInviteInDiscord && (
+            <button
+              type="button"
+              className="menu-top-pill menu-invite-pill"
+              onClick={() => void context.openInviteDialog()}
+            >
+              <InviteIcon />
+              <span>Invite Friends</span>
+            </button>
+          )}
+
+          <div className="menu-top-pill menu-squad-summary">
+            <CrownIcon className="crown-accent" />
+            <div className="squad-pill-text">
+              <span className="squad-pill-label">
+                {hostPlayer ? `Host · ${hostPlayer.displayName}` : 'Connecting Squad'}
+              </span>
+              <span className="squad-pill-meta">
+                {connectedPlayers.length}/{room?.maxPlayers ?? 8} Online · {readyCount} Ready
+              </span>
+            </div>
+            <div className="mini-avatar-cluster">
+              {connectedPlayers.slice(0, 4).map((p) =>
+                p.avatarUrl ? (
+                  <img
+                    key={p.id}
+                    src={p.avatarUrl}
+                    alt={p.displayName}
+                    className="cluster-avatar"
+                    style={{ borderColor: p.color }}
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <span
+                    key={p.id}
+                    className="cluster-avatar cluster-badge"
+                    style={{ borderColor: p.color, color: p.color }}
+                  >
+                    {p.badge}
+                  </span>
+                ),
+              )}
+            </div>
           </div>
-          <div className="mini-avatar-cluster">
-            {connectedPlayers.slice(0, 4).map((p) =>
-              p.avatarUrl ? (
-                <img
-                  key={p.id}
-                  src={p.avatarUrl}
-                  alt={p.displayName}
-                  className="cluster-avatar"
-                  style={{ borderColor: p.color }}
-                  referrerPolicy="no-referrer"
-                />
-              ) : (
-                <span
-                  key={p.id}
-                  className="cluster-avatar cluster-badge"
-                  style={{ borderColor: p.color, color: p.color }}
-                >
-                  {p.badge}
-                </span>
-              ),
-            )}
-          </div>
-        </button>
+        </div>
       </header>
 
       {/* Main Center Stage: Left Vertical Game Menu + Center Crest Title */}
@@ -335,7 +383,9 @@ export function GameMenu({
               </strong>
               <small>
                 {selectedLevel.name} · {selectedLevel.title}
-                {activeModifier !== 'standard' ? ` · ${activeModifier.replace('_', ' ')}` : ''}
+                {activeModifier !== 'standard'
+                  ? ` · ${activeModifier === 'low_gravity' ? 'Chaos (Unranked)' : 'Speed Run'}`
+                  : ''}
               </small>
             </span>
           </button>
@@ -419,7 +469,7 @@ export function GameMenu({
         </div>
       </section>
 
-      {/* Bottom Tagline & Real Network Telemetry */}
+      {/* Bottom Tagline & Network Telemetry */}
       <footer className="menu-footer">
         <span className="menu-tagline">PLAY TOGETHER · SOLVE TOGETHER · WIN TOGETHER</span>
         <div className="menu-telemetry-pill">
@@ -448,7 +498,7 @@ export function GameMenu({
                   `Squad Lobby (${connectedPlayers.length}/${room?.maxPlayers ?? 8})`}
                 {activePanel === 'chambers' && 'Stages (1–4 & Special S1–S4)'}
                 {activePanel === 'leaderboard' && 'Leaderboard & Profile'}
-                {activePanel === 'settings' && 'Settings & Accessibility'}
+                {activePanel === 'settings' && 'Settings & Display'}
                 {activePanel === 'howto' && 'How to Play'}
               </h2>
               <button
@@ -536,7 +586,7 @@ export function GameMenu({
                   >
                     {selfPlayer?.ready ? 'Cancel Ready' : 'Mark Ready'}
                   </button>
-                  {isHost && (
+                  {isHost ? (
                     <button
                       type="button"
                       className="btn btn-primary"
@@ -548,12 +598,23 @@ export function GameMenu({
                     >
                       {isSolo ? 'Start Solo' : `Launch (${connectedPlayers.length}P)`}
                     </button>
+                  ) : (
+                    canInviteInDiscord && (
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => void context.openInviteDialog()}
+                      >
+                        <InviteIcon />
+                        Invite
+                      </button>
+                    )
                   )}
                 </div>
 
                 {(room?.sessionClears.length ?? 0) > 0 && (
                   <div className="drawer-section">
-                    <h3 className="section-title">This Session&apos;s Clears</h3>
+                    <h3 className="section-title">Session Clears</h3>
                     <ul className="event-log">
                       {room!.sessionClears.slice(0, 5).map((cl, idx) => (
                         <li key={`${cl.levelId}-${cl.clearedAt}-${idx}`} className="session-clear-row">
@@ -561,7 +622,7 @@ export function GameMenu({
                             <strong>{cl.levelName}</strong>
                             <span className="log-time">
                               {' '}
-                              · {formatMs(cl.completionTimeMs)} · {cl.respawnCount} respawns
+                              · {formatMs(cl.completionTimeMs)} · {cl.respawnCount} falls
                             </span>
                           </div>
                           <span className={`pill pill-medal-${cl.medal}`}>
@@ -573,11 +634,11 @@ export function GameMenu({
                   </div>
                 )}
 
-                <div className="drawer-section">
-                  <h3 className="section-title">
-                    Diagnostics ({sdkParticipants.length} SDK · {context.platform})
-                  </h3>
-                  <ul className="event-log">
+                <details className="drawer-section diagnostics-details">
+                  <summary className="section-title diagnostics-summary">
+                    Connection Log ({sdkParticipants.length} in channel · {context.platform})
+                  </summary>
+                  <ul className="event-log" style={{ marginTop: 8 }}>
                     {eventLog.map((item) => (
                       <li key={item.id}>
                         <span className="log-time">{item.time}</span>
@@ -585,7 +646,7 @@ export function GameMenu({
                       </li>
                     ))}
                   </ul>
-                </div>
+                </details>
               </div>
             )}
 
@@ -594,7 +655,7 @@ export function GameMenu({
                 {!isHost && (
                   <p className="muted-note">
                     Only the Host (<strong>{hostPlayer?.displayName ?? 'Host'}</strong>) can change
-                    the active chamber and modifier.
+                    the active stage and modifier.
                   </p>
                 )}
 
@@ -612,15 +673,18 @@ export function GameMenu({
                 </div>
                 {SPECIAL_LEVELS.map(renderStageCard)}
 
-                {/* Deterministic Procedural Lab (Zero AI!) */}
+                {/* Deterministic Procedural Lab */}
                 <div
                   className={`chamber-card surface ${
                     selectedLevel.id.startsWith('procedural:') ? 'chamber-card-live' : ''
                   }`}
                 >
                   <div className="chamber-card-head">
-                    <strong>Procedural Lab (Seeded)</strong>
-                    <span className="pill pill-mint">ZERO-AI</span>
+                    <div className="chamber-title-group">
+                      <span className="stage-code-pill">∞</span>
+                      <strong>Procedural Lab</strong>
+                    </div>
+                    <span className="pill pill-mint">SEEDED</span>
                   </div>
                   <p className="muted-note">
                     Deterministic seeded generator combining stacking, moving ferries, crates, keys,
@@ -689,11 +753,10 @@ export function GameMenu({
 
             {activePanel === 'leaderboard' && (
               <div className="drawer-body">
-                {/* Verified Player Profile Card */}
                 <div className="surface profile-box">
                   <div className="profile-head">
                     <strong>{context.user.displayName}</strong>
-                    <span className="mini-tag">YOUR PROFILE</span>
+                    <span className="mini-tag">RANKED PROFILE</span>
                   </div>
                   {profile ? (
                     <div className="profile-stats-grid">
@@ -706,8 +769,8 @@ export function GameMenu({
                         <strong className="medal-gold">{profile.medals.gold}</strong>
                       </div>
                       <div>
-                        <span className="muted-label">Switches</span>
-                        <strong>{profile.switchesTriggered}</strong>
+                        <span className="muted-label">Coins</span>
+                        <strong>{profile.totalCoinsCollected ?? 0}</strong>
                       </div>
                       <div>
                         <span className="muted-label">Keys</span>
@@ -716,13 +779,12 @@ export function GameMenu({
                     </div>
                   ) : (
                     <p className="muted-note">
-                      No recorded clears yet. Complete a chamber to start tracking your best times
-                      and medals!
+                      Complete a Ranked stage (Standard or Speed Run) to record best times, medals,
+                      and DarkCoins!
                     </p>
                   )}
                 </div>
 
-                {/* Filter Pills */}
                 <div className="filter-pills">
                   {[
                     { id: 'all', label: 'All' },
@@ -751,9 +813,9 @@ export function GameMenu({
                   <p className="muted-note">Loading leaderboard...</p>
                 ) : leaderboard.length === 0 ? (
                   <div className="surface howto-item">
-                    <strong>No Records Yet</strong>
+                    <strong>No Ranked Records Yet</strong>
                     <p className="muted-note">
-                      Clear any chamber with your squad (or in Solo Practice) to claim the #1 time!
+                      Clear any stage in Standard or Speed Run mode to claim the #1 time!
                     </p>
                   </div>
                 ) : (
@@ -771,6 +833,9 @@ export function GameMenu({
                           <span className="log-time">
                             {entry.playerNames.join(', ')}
                             {entry.soloPractice ? ' (Solo)' : ` (${entry.playerCount}P)`}
+                            {entry.totalCoins
+                              ? ` · ${entry.coinsCollected ?? 0}/${entry.totalCoins} Coins`
+                              : ''}
                           </span>
                         </div>
                         <div className="lb-time">
@@ -795,6 +860,19 @@ export function GameMenu({
                     type="checkbox"
                     checked={settings.soundEnabled}
                     onChange={(e) => onUpdateSettings({ soundEnabled: e.target.checked })}
+                  />
+                </label>
+
+                <label className="setting-row surface">
+                  <div>
+                    <strong>Ambient Synth Music</strong>
+                    <p className="muted-note">Soft atmospheric background pad during stages</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.musicEnabled}
+                    disabled={!settings.soundEnabled}
+                    onChange={(e) => onUpdateSettings({ musicEnabled: e.target.checked })}
                   />
                 </label>
 
@@ -852,7 +930,7 @@ export function GameMenu({
                 <label className="setting-row surface">
                   <div>
                     <strong>Reduced Motion</strong>
-                    <p className="muted-note">Calms ambient particles and menu animations</p>
+                    <p className="muted-note">Calms ambient particles and camera shake</p>
                   </div>
                   <input
                     type="checkbox"
@@ -865,7 +943,7 @@ export function GameMenu({
                   <div>
                     <strong>Fill Screen (Edge-to-Edge)</strong>
                     <p className="muted-note">
-                      Scales gameplay edge-to-edge inside Discord with zero black letterbox bars
+                      Scales gameplay edge-to-edge inside Discord without letterbox bars
                     </p>
                   </div>
                   <input
@@ -879,7 +957,7 @@ export function GameMenu({
                   <div>
                     <strong>Cinema Mode (Minimal HUD)</strong>
                     <p className="muted-note">
-                      Hides extra HUD &amp; control hints during play for maximum screen space (Key{' '}
+                      Hides extra HUD &amp; control hints during play for max screen space (Key{' '}
                       <code>F</code>)
                     </p>
                   </div>
@@ -895,31 +973,32 @@ export function GameMenu({
             {activePanel === 'howto' && (
               <div className="drawer-body howto-list">
                 <div className="surface howto-item">
-                  <strong>Controls (Keyboard, Gamepad &amp; Mobile Touch)</strong>
+                  <strong>Controls (Keyboard, Gamepad &amp; Touch)</strong>
                   <p className="muted-note">
-                    Move: <code>A/D</code> or <code>←/→</code> · Jump: <code>W/↑/Space</code> ·
-                    Cinema Full View: <code>F</code> · Emotes: <code>1–4</code> · Restart:{' '}
-                    <code>R</code> · Options: <code>Esc</code> · Solo Partner Swap:{' '}
-                    <code>Tab</code>. Controllers work automatically!
+                    Move: <code>A/D</code> · Jump: <code>Space</code> · Drop Through One-Way Ledge:{' '}
+                    <code>S</code> / <code>↓</code> · Personal Respawn at Checkpoint: <code>C</code>{' '}
+                    · Cinema Full View: <code>F</code> · Emotes: <code>1–4</code> · Host Full
+                    Restart: <code>R</code> · Solo Partner Swap/Follow: <code>Tab</code> /{' '}
+                    <code>Q</code>.
                   </p>
                 </div>
                 <div className="surface howto-item">
                   <strong>Standard Stages (1 · 2 · 3 · 4)</strong>
                   <p className="muted-note">
-                    <strong>1 Synchrony:</strong> Head-stacking, bridge locks &amp; dual vault
-                    plates. <strong>2 Cadence:</strong> Moving ferries, security keys &amp; timed
-                    bridges. <strong>3 Leverage:</strong> Push ×1 &amp; ×2 cooperative crates.{' '}
-                    <strong>4 Relay:</strong> Bounce pads, laser overrides, crumbling ledges &amp;
+                    <strong>1 Synchrony:</strong> Head-stacking &amp; vault plates.{' '}
+                    <strong>2 Cadence:</strong> Ferries, keys &amp; 5s bridge.{' '}
+                    <strong>3 Leverage:</strong> Push ×1 &amp; ×2 crates together.{' '}
+                    <strong>4 Relay:</strong> Bounce pads, laser switches, crumbling steps &amp;
                     checkpoints!
                   </p>
                 </div>
                 <div className="surface howto-item">
-                  <strong>Special Stages (S1 · S2 · S3 · S4)</strong>
+                  <strong>Special Stages (S1 · S2 · S3 · S4) &amp; DarkCoins</strong>
                   <p className="muted-note">
-                    <strong>S1 Skyline:</strong> Vertical ascent with one-way ledges &amp; dual
-                    bouncers. <strong>S2 Crossfire:</strong> Dual laser corridors &amp; fast ferries.{' '}
-                    <strong>S3 Foundry:</strong> Multi-crate laser &amp; bridge engineering.{' '}
-                    <strong>S4 Apex:</strong> The grand finale combining every mechanic!
+                    Each stage hides <code>3 DarkCoins</code> for 100% mastery! Special stages add
+                    skyline towers (<strong>S1</strong>), dual lasers &amp; 2P team locks (
+                    <strong>S2</strong>), crate foundry engineering (<strong>S3</strong>), and the
+                    master finale (<strong>S4</strong>).
                   </p>
                 </div>
               </div>

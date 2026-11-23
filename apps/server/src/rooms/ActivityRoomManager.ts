@@ -13,11 +13,13 @@ import {
   SOLO_PUPPET_ID,
   type SessionClearSummary,
   type SimEvent,
+  computeSoloFollowButtons,
   createGameWorld,
   createPlayerEntity,
   getPaletteForSlot,
   normalizeProceduralSeed,
   resolveLevel,
+  respawnPlayerAtCheckpoint,
   sanitizeDisplayName,
   stepGameWorld,
 } from '@together/game-core';
@@ -91,6 +93,7 @@ const IMMEDIATE_EVENT_TYPES = new Set<SimEvent['type']>([
   'bounce',
   'crumble',
   'checkpoint',
+  'coin_pickup',
   'bridge_lock',
   'key_pickup',
   'gate_unlock',
@@ -422,6 +425,13 @@ export class ActivityRoomManager {
     if (!room || room.phase !== 'playing') {
       return { ok: false, code: 'NOT_IN_ROOM', message: 'No active level to restart.' };
     }
+    if (room.hostId !== binding.playerId) {
+      return {
+        ok: false,
+        code: 'NOT_HOST',
+        message: 'Only the host can restart the full stage. Press C to respawn yourself at checkpoint.',
+      };
+    }
 
     this.initLevelWorld(room);
     this.broadcast(room, {
@@ -432,6 +442,42 @@ export class ActivityRoomManager {
     this.broadcastSnapshot(room, []);
     this.startSimulationLoop(room);
     return { ok: true };
+  }
+
+  respawnSelf(socket: WebSocket): boolean {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) return false;
+    const room = this.rooms.get(binding.instanceId);
+    if (!room || room.phase !== 'playing' || !room.world || !room.activeLevel) return false;
+    if (room.world.status !== 'playing') return false;
+
+    const targetId =
+      room.world.soloPractice && room.world.soloActiveId
+        ? room.world.soloActiveId
+        : binding.playerId;
+    const player = room.world.players.find((p) => p.id === targetId && p.connected);
+    if (!player) return false;
+
+    const ev = respawnPlayerAtCheckpoint(room.activeLevel, room.world, player);
+    room.world.respawnCount += 1;
+    const contrib = room.world.contributions[player.id];
+    if (contrib) contrib.respawns += 1;
+    this.broadcastSnapshot(room, [ev]);
+    return true;
+  }
+
+  toggleSoloFollow(socket: WebSocket): boolean {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) return false;
+    const room = this.rooms.get(binding.instanceId);
+    if (!room || room.phase !== 'playing' || !room.world || !room.world.soloPractice) return false;
+
+    const realConnectedCount = Array.from(room.players.values()).filter((p) => p.connected).length;
+    if (realConnectedCount !== 1) return false;
+
+    room.world.soloFollow = !Boolean(room.world.soloFollow);
+    this.broadcastSnapshot(room, []);
+    return true;
   }
 
   returnToLobby(socket: WebSocket): ActionResult {
@@ -660,6 +706,21 @@ export class ActivityRoomManager {
           inputRecord[id] = inp;
         }
 
+        if (room.world.soloPractice && room.world.soloFollow) {
+          const leaderId = room.world.soloActiveId ?? room.world.players[0]?.id;
+          const follower = room.world.players.find((p) => p.id !== leaderId && p.connected);
+          if (leaderId && follower) {
+            inputRecord[follower.id] = {
+              buttons: computeSoloFollowButtons(
+                room.world,
+                room.activeLevel,
+                follower.id,
+                leaderId,
+              ),
+            };
+          }
+        }
+
         const tickEvents = stepGameWorld(room.world, inputRecord, room.activeLevel);
         if (tickEvents.length > 0) {
           room.pendingEvents.push(...tickEvents);
@@ -710,6 +771,10 @@ export class ActivityRoomManager {
 
     if (this.statsStore) {
       const realPlayers = world.players.filter((p) => !p.isSoloPuppet);
+      const coinList = world.coins ?? [];
+      const coinsCollected = coinList.filter((c) => c.collected).length;
+      const totalCoins = level.coins?.length ?? coinList.length;
+
       this.statsStore.recordClear({
         levelId: level.id,
         levelName: `${level.name} · ${level.title}`,
@@ -717,6 +782,8 @@ export class ActivityRoomManager {
         completionTimeMs: world.completionTimeMs,
         respawnCount: world.respawnCount,
         medal: world.medal,
+        coinsCollected,
+        totalCoins,
         soloPractice: world.soloPractice,
         players: realPlayers.map((p) => ({
           id: p.id,

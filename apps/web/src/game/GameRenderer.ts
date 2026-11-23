@@ -12,7 +12,11 @@ import {
   getPaletteForSlot,
 } from '@together/game-core';
 
-interface Particle {
+type ParticleKind = 'square' | 'ring' | 'spark';
+
+interface PooledParticle {
+  active: boolean;
+  kind: ParticleKind;
   x: number;
   y: number;
   vx: number;
@@ -21,6 +25,23 @@ interface Particle {
   color: string;
   life: number;
   maxLife: number;
+  gravity: number;
+}
+
+interface TrailPoint {
+  x: number;
+  y: number;
+  alpha: number;
+}
+
+interface PlayerJuiceState {
+  scaleX: number;
+  scaleY: number;
+  wasGrounded: boolean;
+  lastVy: number;
+  runDustTimer: number;
+  trail: [TrailPoint, TrailPoint, TrailPoint];
+  trailTimer: number;
 }
 
 export interface RenderedPlayerPose {
@@ -38,70 +59,113 @@ export interface ActiveEmote {
 }
 
 const EMOTE_LABEL_MAP = new Map<EmotePingId, string>(EMOTE_PINGS.map((e) => [e.id, e.label]));
+const PARTICLE_POOL_SIZE = 220;
 
 /**
- * Ultra-fast 60 FPS high-contrast dark-theme Canvas2D pixel-art renderer.
- * Performance architecture for smooth Discord Activity WebView playback:
- *  - ZERO ctx.shadowBlur (replaces expensive Gaussian blurs with crisp translucent pixel halos)
- *  - Offscreen static layer cache: pre-renders backdrop, grid, watermark, beveled walls & one-way
- *    ledges ONCE per (levelId, highContrast) and blits in a single drawImage() per frame!
- *  - 3-tier luminance figure-ground hierarchy (Celeste / Hollow Knight style).
+ * High-performance 60 FPS Canvas2D pixel-art renderer inspired by LittleJS / Celeste game feel:
+ *  - ZERO ctx.shadowBlur (fast layered translucent pixel halos)
+ *  - Pre-allocated fixed Object Pool (220 particles, 0 GC allocation churn)
+ *  - Offscreen Static Layer Cache (1 blit per frame for sky, grid, watermark, walls & one-way decks)
+ *  - Foot-anchored Squash & Stretch, running dust, fast-fall/bounce afterimages, shockwave rings & trauma shake
  */
 export class GameRenderer {
-  private readonly particles: Particle[] = [];
+  private readonly pool: PooledParticle[] = Array.from({ length: PARTICLE_POOL_SIZE }, () => ({
+    active: false,
+    kind: 'square',
+    x: 0,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    size: 2,
+    color: '#FFFFFF',
+    life: 0,
+    maxLife: 0.3,
+    gravity: 300,
+  }));
+  private readonly juiceByPlayerId = new Map<string, PlayerJuiceState>();
   private animTime = 0;
+  private shakeMag = 0;
 
   private staticCache: HTMLCanvasElement | null = null;
   private staticCacheKey = '';
 
-  spawnEventParticles(events: readonly SimEvent[]): void {
+  spawnLocalJumpEffect(x: number, y: number, color: string): void {
+    this.burst(x, y, color, 5, 44, -26, 0.24, 180);
+  }
+
+  triggerShake(magnitude: number): void {
+    this.shakeMag = Math.max(this.shakeMag, Math.min(6, magnitude));
+  }
+
+  spawnEventParticles(events: readonly SimEvent[], ignoreJumpForId?: string): void {
     for (const ev of events) {
       const color = ev.color ?? THEME_COLORS.primaryAccent;
       switch (ev.type) {
         case 'jump':
-          this.burst(ev.x, ev.y, color, 6, 48, -28, 0.26);
+          if (ignoreJumpForId && ev.playerId === ignoreJumpForId) break;
+          this.burst(ev.x, ev.y, color, 5, 44, -26, 0.24, 180);
           break;
         case 'land':
-          this.burst(ev.x, ev.y, '#9AA6C7', 4, 38, -14, 0.2);
+          this.burst(ev.x, ev.y, '#9AA6C7', 4, 38, -14, 0.18, 160);
           break;
         case 'bounce':
-          this.burst(ev.x, ev.y, color, 14, 90, -110, 0.42);
+          this.burst(ev.x, ev.y, color, 14, 92, -118, 0.4, 240);
+          this.spawnRing(ev.x, ev.y, color, 26, 0.32);
+          this.triggerShake(2.8);
           break;
         case 'crumble':
-          this.burst(ev.x, ev.y, '#FFB84D', 12, 85, -35, 0.45);
+          this.burst(ev.x, ev.y, '#FFB84D', 12, 85, -35, 0.44, 340);
+          this.triggerShake(1.8);
           break;
         case 'checkpoint':
-          this.burst(ev.x, ev.y, '#4FF0D6', 18, 95, -95, 0.55);
+          this.burst(ev.x, ev.y, '#4FF0D6', 18, 95, -95, 0.55, 220);
+          this.spawnRing(ev.x, ev.y, '#4FF0D6', 32, 0.45);
+          break;
+        case 'coin_pickup':
+          this.burst(ev.x, ev.y, '#FFE066', 14, 96, -86, 0.46, 200);
+          this.spawnRing(ev.x, ev.y, '#FFE066', 24, 0.34);
           break;
         case 'switch_on':
-          this.burst(ev.x, ev.y, color, 8, 65, -55, 0.34);
+          this.burst(ev.x, ev.y, color, 8, 65, -55, 0.32, 240);
           break;
         case 'bridge_on':
         case 'bridge_lock':
-          this.burst(ev.x, ev.y, '#4FF0D6', 14, 95, -55, 0.45);
+          this.burst(ev.x, ev.y, '#4FF0D6', 14, 95, -55, 0.42, 220);
+          this.spawnRing(ev.x, ev.y, '#4FF0D6', 28, 0.35);
           break;
         case 'key_pickup':
-          this.burst(ev.x, ev.y, '#FFD166', 16, 85, -70, 0.48);
+          this.burst(ev.x, ev.y, '#FFD166', 16, 85, -70, 0.48, 200);
+          this.spawnRing(ev.x, ev.y, '#FFD166', 26, 0.36);
           break;
         case 'gate_unlock':
-          this.burst(ev.x, ev.y, color, 18, 105, -65, 0.55);
+          this.burst(ev.x, ev.y, color, 18, 105, -65, 0.52, 240);
+          this.spawnRing(ev.x, ev.y, color, 34, 0.4);
+          this.triggerShake(3.2);
           break;
         case 'door_unlock':
-          this.burst(ev.x, ev.y, '#4FF0D6', 22, 115, -70, 0.6);
+          this.burst(ev.x, ev.y, '#4FF0D6', 22, 115, -70, 0.58, 220);
+          this.spawnRing(ev.x, ev.y, '#4FF0D6', 42, 0.48);
+          this.triggerShake(3.5);
           break;
         case 'respawn':
-          this.burst(ev.x, ev.y, '#FF4D6D', 16, 100, -65, 0.48);
+          this.burst(ev.x, ev.y, '#FF4D6D', 16, 100, -65, 0.45, 280);
+          this.spawnRing(ev.x, ev.y, '#FF4D6D', 26, 0.34);
+          this.triggerShake(4.2);
           break;
         case 'level_complete':
-          this.burst(ev.x, ev.y, '#A28BFF', 22, 135, -95, 0.85);
-          this.burst(ev.x, ev.y, '#4FF0D6', 22, 135, -105, 0.9);
+          this.burst(ev.x, ev.y, '#A28BFF', 24, 145, -105, 0.82, 190);
+          this.burst(ev.x, ev.y, '#4FF0D6', 24, 145, -115, 0.88, 190);
+          this.spawnRing(ev.x, ev.y, '#4FF0D6', 54, 0.55);
+          this.triggerShake(4.0);
           break;
       }
     }
   }
 
   resetEffects(): void {
-    this.particles.length = 0;
+    for (const pt of this.pool) pt.active = false;
+    this.juiceByPlayerId.clear();
+    this.shakeMag = 0;
   }
 
   render(
@@ -137,6 +201,12 @@ export class GameRenderer {
     this.animTime += reducedMotion ? dtSec * 0.25 : dtSec;
     this.updateParticles(dtSec);
 
+    if (reducedMotion || this.shakeMag < 0.1) {
+      this.shakeMag = 0;
+    } else {
+      this.shakeMag *= Math.exp(-18 * dtSec);
+    }
+
     ctx.save();
     ctx.imageSmoothingEnabled = false;
 
@@ -155,11 +225,12 @@ export class GameRenderer {
 
     const drawW = level.width * scaleX;
     const drawH = level.height * scaleY;
-    const offsetX = Math.floor((viewW - drawW) / 2);
-    const offsetY = Math.floor((viewH - drawH) / 2);
+    const shakeX = this.shakeMag > 0 ? Math.round((Math.random() - 0.5) * 2 * this.shakeMag) : 0;
+    const shakeY = this.shakeMag > 0 ? Math.round((Math.random() - 0.5) * 2 * this.shakeMag) : 0;
+    const offsetX = Math.floor((viewW - drawW) / 2) + shakeX;
+    const offsetY = Math.floor((viewH - drawH) / 2) + shakeY;
 
-    // Only fill letterbox bars if present (avoid wasted full-screen overdraw)
-    if (offsetX > 0 || offsetY > 0 || drawW < viewW || drawH < viewH) {
+    if (offsetX > 0 || offsetY > 0 || drawW < viewW || drawH < viewH || this.shakeMag > 0) {
       ctx.fillStyle = '#090B12';
       ctx.fillRect(0, 0, viewW, viewH);
     }
@@ -167,7 +238,7 @@ export class GameRenderer {
     ctx.translate(offsetX, offsetY);
     ctx.scale(scaleX, scaleY);
 
-    // 1. Single-blit cached static layer (backdrop + grid + watermark + all beveled walls + one-way ledges)
+    // 1. Single-blit cached static layer
     const staticCanvas = this.getOrBuildStaticLayer(level, highContrast);
     if (staticCanvas) {
       ctx.drawImage(staticCanvas, 0, 0);
@@ -180,7 +251,7 @@ export class GameRenderer {
     // 2. Crisp diegetic hint stencils
     this.drawChamberCues(ctx, level, world);
 
-    // 3. Glowing circuit wires (fast layered stroke, zero shadowBlur)
+    // 3. Glowing circuit wires (zero shadowBlur)
     this.drawWires(ctx, level, world);
 
     // 4. Crumbling warning platforms
@@ -207,7 +278,7 @@ export class GameRenderer {
     // 11. Locked security gates
     this.drawLockedGates(ctx, level, world);
 
-    // 12. Cooperative switches
+    // 12. Cooperative switches (with live 0/2 team counter badges!)
     this.drawSwitches(ctx, level, world);
 
     // 13. High-contrast Amber x1 & Violet x2 cooperative push crates
@@ -216,10 +287,13 @@ export class GameRenderer {
     // 14. Exit door portal
     this.drawExitDoor(ctx, level, world);
 
-    // 15. Radiant gold keys
+    // 15. Optional Collectible DarkCoins (3 per stage!)
+    this.drawCoins(ctx, level, world);
+
+    // 16. Radiant gold keys
     this.drawKeys(ctx, level, world, posesByPlayerId);
 
-    // 16. Crisp dark-outlined vivid pixel players + emotes
+    // 17. Animated squash/stretch players, speed afterimages, dust & emotes
     const controlledId = world.soloPractice ? (world.soloActiveId ?? localUserId) : localUserId;
     const ordered = [...world.players].sort((a, b) => {
       if (a.id === controlledId) return 1;
@@ -236,28 +310,127 @@ export class GameRenderer {
         facing: player.facing,
         grounded: player.grounded,
       };
+      const juice = this.updatePlayerJuice(player, pose, dtSec, reducedMotion);
       const activeEmote = emotes?.get(player.id);
       const emoteText =
         activeEmote && activeEmote.expiresAt > nowMs
           ? (EMOTE_LABEL_MAP.get(activeEmote.emote) ?? null)
           : null;
 
-      this.drawPlayer(ctx, player, pose, {
+      this.drawPlayer(ctx, player, pose, juice, {
         isControlled: player.id === controlledId,
         soloPractice: world.soloPractice,
         showNames,
         colorblindShapes,
         highContrast,
+        reducedMotion,
         emoteText,
       });
     }
 
-    // 17. Pixel particles
-    if (!reducedMotion && this.particles.length > 0) {
+    // 18. Pooled pixel particles & expanding shockwave rings
+    if (!reducedMotion) {
       this.drawParticles(ctx);
     }
 
     ctx.restore();
+  }
+
+  private updatePlayerJuice(
+    player: SimPlayerState,
+    pose: RenderedPlayerPose,
+    dtSec: number,
+    reducedMotion: boolean,
+  ): PlayerJuiceState {
+    let j = this.juiceByPlayerId.get(player.id);
+    if (!j) {
+      j = {
+        scaleX: 1,
+        scaleY: 1,
+        wasGrounded: pose.grounded,
+        lastVy: pose.vy,
+        runDustTimer: 0,
+        trail: [
+          { x: pose.x, y: pose.y, alpha: 0 },
+          { x: pose.x, y: pose.y, alpha: 0 },
+          { x: pose.x, y: pose.y, alpha: 0 },
+        ],
+        trailTimer: 0,
+      };
+      this.juiceByPlayerId.set(player.id, j);
+    }
+
+    if (reducedMotion || !player.connected) {
+      j.scaleX = 1;
+      j.scaleY = 1;
+      j.wasGrounded = pose.grounded;
+      return j;
+    }
+
+    // Takeoff stretch impulse
+    if (j.wasGrounded && !pose.grounded && pose.vy < -160) {
+      j.scaleX = pose.vy < -520 ? 0.72 : 0.8;
+      j.scaleY = pose.vy < -520 ? 1.34 : 1.24;
+    }
+
+    // Impact squash + dust puff upon landing
+    if (!j.wasGrounded && pose.grounded) {
+      const heavy = j.lastVy > 340;
+      j.scaleX = heavy ? 1.28 : 1.18;
+      j.scaleY = heavy ? 0.74 : 0.84;
+      this.burst(
+        pose.x + PHYSICS.PLAYER_WIDTH / 2,
+        pose.y + PHYSICS.PLAYER_HEIGHT,
+        '#BAC4DE',
+        heavy ? 6 : 3,
+        heavy ? 48 : 30,
+        -22,
+        0.2,
+        140,
+      );
+    }
+
+    // Running foot dust puffs
+    if (pose.grounded && Math.abs(pose.vx) > 95) {
+      j.runDustTimer += dtSec;
+      if (j.runDustTimer >= 0.11) {
+        j.runDustTimer = 0;
+        this.spawnSingleParticle(
+          pose.x + (pose.facing > 0 ? 3 : PHYSICS.PLAYER_WIDTH - 3),
+          pose.y + PHYSICS.PLAYER_HEIGHT - 1,
+          -pose.facing * (12 + Math.random() * 14),
+          -14 - Math.random() * 12,
+          2,
+          '#9AA6C7',
+          0.22,
+          60,
+        );
+      }
+    } else {
+      j.runDustTimer = 0.06;
+    }
+
+    // Fast-motion afterimage trail (bounce pads / fast falls)
+    const fastAir = !pose.grounded && (Math.abs(pose.vy) > 420 || Math.hypot(pose.vx, pose.vy) > 460);
+    for (const tp of j.trail) {
+      if (tp.alpha > 0) tp.alpha = Math.max(0, tp.alpha - dtSec * 3.2);
+    }
+    if (fastAir) {
+      j.trailTimer += dtSec;
+      if (j.trailTimer >= 0.032) {
+        j.trailTimer = 0;
+        j.trail[2] = { ...j.trail[1] };
+        j.trail[1] = { ...j.trail[0] };
+        j.trail[0] = { x: pose.x, y: pose.y, alpha: 0.45 };
+      }
+    }
+
+    const recover = 1 - Math.exp(-18 * dtSec);
+    j.scaleX += (1 - j.scaleX) * recover;
+    j.scaleY += (1 - j.scaleY) * recover;
+    j.wasGrounded = pose.grounded;
+    j.lastVy = pose.vy;
+    return j;
   }
 
   private getOrBuildStaticLayer(
@@ -294,7 +467,6 @@ export class GameRenderer {
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, level.width, level.height);
 
-    // Soft ambient pools tinted with stage accent
     const gradLeft = ctx.createRadialGradient(230, 260, 14, 230, 260, 260);
     gradLeft.addColorStop(0, `${level.themeAccent}18`);
     gradLeft.addColorStop(1, 'rgba(11, 13, 22, 0)');
@@ -307,7 +479,6 @@ export class GameRenderer {
     ctx.fillStyle = gradRight;
     ctx.fillRect(0, 0, level.width, level.height);
 
-    // Subtle low-contrast blueprint grid (batched single stroke)
     ctx.strokeStyle = 'rgba(56, 68, 98, 0.22)';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -321,7 +492,6 @@ export class GameRenderer {
     }
     ctx.stroke();
 
-    // Subtle background watermark with stage code (1..4, S1..S4, ∞)
     ctx.fillStyle = 'rgba(230, 234, 242, 0.06)';
     ctx.font = '900 62px monospace';
     ctx.textAlign = 'left';
@@ -386,12 +556,10 @@ export class GameRenderer {
         else ctx.lineTo(pt.x, pt.y);
       }
 
-      // Conduit backing
       ctx.strokeStyle = '#181E30';
       ctx.lineWidth = 4;
       ctx.stroke();
 
-      // Fast translucent halo when lit (zero shadowBlur!)
       if (isLit) {
         ctx.save();
         ctx.globalAlpha = 0.28;
@@ -509,7 +677,6 @@ export class GameRenderer {
       ctx.fillRect(pad.x + 6, pad.y + 3, 3, 4);
       ctx.fillRect(pad.x + pad.w - 9, pad.y + 3, 3, 4);
 
-      // Fast halo + launch cap (zero shadowBlur)
       ctx.fillStyle = halo;
       ctx.fillRect(pad.x - 3, pad.y + pulse - 2, pad.w + 6, 8);
       ctx.fillStyle = color;
@@ -568,7 +735,6 @@ export class GameRenderer {
         continue;
       }
 
-      // Fast outer laser aura + crimson beam + pulsing core (zero shadowBlur)
       ctx.fillStyle = 'rgba(255, 59, 107, 0.24)';
       ctx.fillRect(def.x - 4, def.y + 5, def.w + 8, def.h - 10);
       ctx.fillStyle = '#FF3B6B';
@@ -585,7 +751,6 @@ export class GameRenderer {
       ctx.fillStyle = '#2B0D18';
       ctx.fillRect(h.x, h.y, h.w, h.h);
 
-      // Fast plasma surface aura (zero shadowBlur)
       ctx.fillStyle = 'rgba(255, 59, 107, 0.22)';
       ctx.fillRect(h.x, h.y - 2, h.w, 12);
 
@@ -630,7 +795,6 @@ export class GameRenderer {
         continue;
       }
 
-      // Fast outer neon halo (zero shadowBlur)
       ctx.fillStyle = locked ? 'rgba(79, 240, 214, 0.16)' : 'rgba(180, 155, 255, 0.16)';
       ctx.fillRect(def.x - 2, def.y - 3, def.w + 4, def.h + 6);
 
@@ -794,6 +958,43 @@ export class GameRenderer {
     }
   }
 
+  private drawCoins(
+    ctx: CanvasRenderingContext2D,
+    level: LevelDefinition,
+    world: GameWorldState,
+  ): void {
+    const defs = level.coins ?? [];
+    const runtime = world.coins ?? [];
+    for (let i = 0; i < defs.length; i += 1) {
+      const def = defs[i]!;
+      const st = runtime[i];
+      if (st?.collected) continue;
+
+      const bob = Math.round(Math.sin(this.animTime * 4.2 + i * 1.4) * 2.5);
+      const spin = Math.max(0.35, Math.abs(Math.cos(this.animTime * 3.4 + i)));
+      const cx = Math.round(def.x);
+      const cy = Math.round(def.y + bob);
+      const halfW = Math.max(2, Math.round(5.5 * spin));
+
+      // Subtle glowing halo (zero shadowBlur)
+      ctx.fillStyle = 'rgba(255, 224, 102, 0.2)';
+      ctx.fillRect(cx - halfW - 3, cy - 8, (halfW + 3) * 2, 16);
+
+      // Dark pixel rim + Obsidian-Gold DarkCoin face
+      ctx.fillStyle = '#0B0D16';
+      ctx.fillRect(cx - halfW - 1, cy - 6, (halfW + 1) * 2, 12);
+
+      ctx.fillStyle = '#FFE066';
+      ctx.fillRect(cx - halfW, cy - 5, halfW * 2, 10);
+
+      // Inner dark-violet crescent emblem distinguishing DarkCoins
+      ctx.fillStyle = '#33245C';
+      ctx.fillRect(cx - Math.max(1, halfW - 2), cy - 3, Math.max(2, (halfW - 2) * 2), 6);
+      ctx.fillStyle = '#FFF5B8';
+      ctx.fillRect(cx - 1, cy - 2, 2, 4);
+    }
+  }
+
   private drawKeys(
     ctx: CanvasRenderingContext2D,
     level: LevelDefinition,
@@ -820,15 +1021,12 @@ export class GameRenderer {
         }
       }
 
-      // Fast gold halo (zero shadowBlur)
       ctx.fillStyle = 'rgba(255, 209, 102, 0.24)';
       ctx.fillRect(kx - 9, ky - 7, 22, 13);
 
-      // Dark outline for instant readability
       ctx.fillStyle = '#0B0D16';
       ctx.fillRect(kx - 7, ky - 5, 9, 9);
       ctx.fillRect(kx + 1, ky - 2, 10, 4);
-      // Radiant Gold key
       ctx.fillStyle = '#FFD166';
       ctx.fillRect(kx - 6, ky - 4, 7, 7);
       ctx.fillStyle = '#0B0D16';
@@ -871,6 +1069,17 @@ export class GameRenderer {
       ctx.fillStyle = '#E6EAF2';
       ctx.fillRect(def.x + 2, plateY, def.w - 4, 1);
 
+      const reqP = state?.requiredPressers ?? (world.soloPractice ? 1 : (def.requiredPlayers ?? 1));
+      if (reqP > 1 && !state?.latched) {
+        const curP = Math.min(reqP, state?.pressers ?? 0);
+        ctx.fillStyle = '#0B0D16';
+        ctx.fillRect(def.x + def.w / 2 - 11, def.y - 12, 22, 10);
+        ctx.fillStyle = curP >= reqP ? '#4FF0D6' : '#FFD166';
+        ctx.font = '800 8px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${curP}/${reqP}`, def.x + def.w / 2, def.y - 4);
+      }
+
       ctx.fillStyle = active ? accent : '#C4CEE6';
       ctx.font = '800 8px monospace';
       ctx.textAlign = 'center';
@@ -900,7 +1109,6 @@ export class GameRenderer {
 
     if (unlocked) {
       const pulse = 0.32 + 0.12 * Math.sin(this.animTime * 4);
-      // Outer portal glow halo (zero shadowBlur)
       ctx.fillStyle = 'rgba(79, 240, 214, 0.16)';
       ctx.fillRect(door.x - 7, door.y - 9, door.w + 14, door.h + 12);
       ctx.fillStyle = `rgba(79, 240, 214, ${pulse.toFixed(2)})`;
@@ -983,12 +1191,14 @@ export class GameRenderer {
     ctx: CanvasRenderingContext2D,
     player: SimPlayerState,
     pose: RenderedPlayerPose,
+    juice: PlayerJuiceState,
     opts: {
       isControlled: boolean;
       soloPractice: boolean;
       showNames: boolean;
       colorblindShapes: boolean;
       highContrast: boolean;
+      reducedMotion: boolean;
       emoteText: string | null;
     },
   ): void {
@@ -1001,6 +1211,17 @@ export class GameRenderer {
       player.invulnTicks > 0 && Math.floor(player.invulnTicks / 4) % 2 === 0 ? 0.45 : 1;
     const alpha = (player.connected ? 1 : 0.35) * invulnAlpha;
 
+    // Fast-motion ghost trails behind player
+    if (!opts.reducedMotion && player.connected) {
+      for (const tp of juice.trail) {
+        if (tp.alpha <= 0.03) continue;
+        ctx.globalAlpha = tp.alpha * 0.42;
+        ctx.fillStyle = player.color;
+        ctx.fillRect(Math.round(tp.x) + 1, Math.round(tp.y) + 1, w - 2, h - 4);
+      }
+      ctx.globalAlpha = 1;
+    }
+
     ctx.save();
     ctx.globalAlpha = alpha;
 
@@ -1009,57 +1230,60 @@ export class GameRenderer {
       ctx.fillRect(px + 2, py + h - 1, w - 4, 2);
     }
 
-    const stretchY = !pose.grounded && Math.abs(pose.vy) > 90 ? 1 : 0;
-    const bodyY = py - stretchY;
-    const bodyH = h - 4 + stretchY;
+    // Foot-anchored squash & stretch transform (keeps pixel feet planted cleanly!)
+    const footAnchorX = px + w / 2;
+    const footAnchorY = py + h;
+    ctx.save();
+    ctx.translate(footAnchorX, footAnchorY);
+    ctx.scale(juice.scaleX, juice.scaleY);
 
-    // Fast controlled-player aura (zero shadowBlur!)
+    const lx = -w / 2;
+    const ly = -h;
+    const bodyH = h - 4;
+
     if (opts.isControlled) {
       ctx.fillStyle = `${player.color}30`;
-      ctx.fillRect(px - 3, bodyY - 2, w + 6, bodyH + 4);
+      ctx.fillRect(lx - 3, ly - 2, w + 6, bodyH + 4);
     }
 
-    // Crisp 1px dark outer silhouette outline
     ctx.fillStyle = '#090B12';
-    ctx.fillRect(px - 1, bodyY, w + 2, bodyH);
-    ctx.fillRect(px + 1, py + h - 4, 7, 5);
-    ctx.fillRect(px + w - 8, py + h - 4, 7, 5);
+    ctx.fillRect(lx - 1, ly, w + 2, bodyH);
+    ctx.fillRect(lx + 1, ly + h - 4, 7, 5);
+    ctx.fillRect(lx + w - 8, ly + h - 4, 7, 5);
 
-    // Vivid player torso
     ctx.fillStyle = player.color;
-    ctx.fillRect(px + 1, bodyY + 1, w - 2, bodyH - 2);
-    ctx.fillRect(px, bodyY + 3, w, bodyH - 6);
+    ctx.fillRect(lx + 1, ly + 1, w - 2, bodyH - 2);
+    ctx.fillRect(lx, ly + 3, w, bodyH - 6);
 
     if (opts.highContrast) {
       ctx.strokeStyle = '#E6EAF2';
       ctx.lineWidth = 1.2;
-      ctx.strokeRect(px + 0.5, bodyY + 1.5, w - 1, bodyH - 3);
+      ctx.strokeRect(lx + 0.5, ly + 1.5, w - 1, bodyH - 3);
     }
 
-    // Luminous flat stackable crown cap
     ctx.fillStyle = 'rgba(235, 242, 255, 0.62)';
-    ctx.fillRect(px + 2, bodyY + 1, w - 4, 2);
+    ctx.fillRect(lx + 2, ly + 1, w - 4, 2);
 
-    // Animated legs
     const moving = Math.abs(pose.vx) > 16 && pose.grounded;
     const stride = moving ? Math.round(Math.sin(this.animTime * 18) * 2) : 0;
     ctx.fillStyle = player.color;
-    ctx.fillRect(px + 2, py + h - 4 + Math.min(0, stride), 5, 4);
-    ctx.fillRect(px + w - 7, py + h - 4 + Math.min(0, -stride), 5, 4);
+    ctx.fillRect(lx + 2, ly + h - 4 + Math.min(0, stride), 5, 4);
+    ctx.fillRect(lx + w - 7, ly + h - 4 + Math.min(0, -stride), 5, 4);
 
-    // Dark pixel visor & bright eyes
     const eyeShift = pose.facing > 0 ? 1 : -1;
     ctx.fillStyle = '#0B0D16';
-    ctx.fillRect(px + 3 + eyeShift, bodyY + 6, w - 6, 5);
+    ctx.fillRect(lx + 3 + eyeShift, ly + 6, w - 6, 5);
 
     ctx.fillStyle = player.atExit ? '#4FF0D6' : '#F0F4FF';
-    ctx.fillRect(px + 5 + eyeShift, bodyY + 7, 2, 3);
-    ctx.fillRect(px + 11 + eyeShift, bodyY + 7, 2, 3);
+    ctx.fillRect(lx + 5 + eyeShift, ly + 7, 2, 3);
+    ctx.fillRect(lx + 11 + eyeShift, ly + 7, 2, 3);
 
     if (opts.colorblindShapes) {
       const slotInfo = getPaletteForSlot(player.slot);
-      this.drawShapeEmblem(ctx, slotInfo.shape, px + Math.round(w / 2), bodyY + 14);
+      this.drawShapeEmblem(ctx, slotInfo.shape, 0, ly + 14);
     }
+
+    ctx.restore();
 
     const label = player.isSoloPuppet
       ? `${player.badge} · SOLO`
@@ -1100,6 +1324,40 @@ export class GameRenderer {
     ctx.restore();
   }
 
+  private spawnSingleParticle(
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+    size: number,
+    color: string,
+    lifeSec: number,
+    gravity: number,
+    kind: ParticleKind = 'square',
+  ): void {
+    for (let i = 0; i < this.pool.length; i += 1) {
+      const slot = this.pool[i]!;
+      if (!slot.active) {
+        slot.active = true;
+        slot.kind = kind;
+        slot.x = x;
+        slot.y = y;
+        slot.vx = vx;
+        slot.vy = vy;
+        slot.size = size;
+        slot.color = color;
+        slot.life = lifeSec;
+        slot.maxLife = lifeSec;
+        slot.gravity = gravity;
+        return;
+      }
+    }
+  }
+
+  private spawnRing(x: number, y: number, color: string, endRadius: number, lifeSec: number): void {
+    this.spawnSingleParticle(x, y, 0, 0, endRadius, color, lifeSec, 0, 'ring');
+  }
+
   private burst(
     x: number,
     y: number,
@@ -1108,41 +1366,55 @@ export class GameRenderer {
     spreadX: number,
     upVy: number,
     lifeSec: number,
+    gravity = 300,
   ): void {
     for (let i = 0; i < count; i += 1) {
-      if (this.particles.length >= 160) break;
-      this.particles.push({
+      this.spawnSingleParticle(
         x,
         y,
-        vx: (Math.random() - 0.5) * 2 * spreadX,
-        vy: upVy * (0.4 + Math.random() * 0.9),
-        size: Math.random() > 0.5 ? 3 : 2,
+        (Math.random() - 0.5) * 2 * spreadX,
+        upVy * (0.4 + Math.random() * 0.9),
+        Math.random() > 0.5 ? 3 : 2,
         color,
-        life: lifeSec * (0.7 + Math.random() * 0.5),
-        maxLife: lifeSec,
-      });
+        lifeSec * (0.7 + Math.random() * 0.5),
+        gravity,
+        'square',
+      );
     }
   }
 
   private updateParticles(dtSec: number): void {
-    for (let i = this.particles.length - 1; i >= 0; i -= 1) {
-      const pt = this.particles[i]!;
+    for (let i = 0; i < this.pool.length; i += 1) {
+      const pt = this.pool[i]!;
+      if (!pt.active) continue;
       pt.life -= dtSec;
       if (pt.life <= 0) {
-        this.particles.splice(i, 1);
+        pt.active = false;
         continue;
       }
-      pt.vy += 320 * dtSec;
-      pt.x += pt.vx * dtSec;
-      pt.y += pt.vy * dtSec;
+      if (pt.kind !== 'ring') {
+        pt.vy += pt.gravity * dtSec;
+        pt.x += pt.vx * dtSec;
+        pt.y += pt.vy * dtSec;
+      }
     }
   }
 
   private drawParticles(ctx: CanvasRenderingContext2D): void {
-    for (const pt of this.particles) {
-      ctx.globalAlpha = Math.max(0, Math.min(1, pt.life / pt.maxLife));
-      ctx.fillStyle = pt.color;
-      ctx.fillRect(Math.round(pt.x), Math.round(pt.y), pt.size, pt.size);
+    for (let i = 0; i < this.pool.length; i += 1) {
+      const pt = this.pool[i]!;
+      if (!pt.active) continue;
+      const t = Math.max(0, Math.min(1, pt.life / pt.maxLife));
+      ctx.globalAlpha = t;
+      if (pt.kind === 'ring') {
+        const radius = Math.max(3, Math.round(pt.size * (1 - t)));
+        ctx.strokeStyle = pt.color;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(Math.round(pt.x - radius), Math.round(pt.y - radius), radius * 2, radius * 2);
+      } else {
+        ctx.fillStyle = pt.color;
+        ctx.fillRect(Math.round(pt.x), Math.round(pt.y), pt.size, pt.size);
+      }
     }
     ctx.globalAlpha = 1;
   }

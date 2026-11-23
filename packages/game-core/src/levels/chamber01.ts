@@ -92,6 +92,11 @@ export const LEVEL_CHAMBER_01: LevelDefinition = {
   movingPlatforms: [],
   crates: [],
   keys: [],
+  coins: [
+    { id: 'c1_1', x: 76, y: 294 },
+    { id: 'c1_2', x: 292, y: 244 },
+    { id: 'c1_3', x: 424, y: 316 },
+  ],
   lockedGates: [],
   exitDoor: { x: 720, y: 336, w: 44, h: 48 },
   requiresVaultSwitches: true,

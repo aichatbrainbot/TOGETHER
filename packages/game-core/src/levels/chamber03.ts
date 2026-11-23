@@ -123,6 +123,11 @@ export const LEVEL_CHAMBER_03: LevelDefinition = {
       accent: 'gold',
     },
   ],
+  coins: [
+    { id: 'c3_1', x: 148, y: 320 },
+    { id: 'c3_2', x: 210, y: 204 },
+    { id: 'c3_3', x: 514, y: 332 },
+  ],
   lockedGates: [
     {
       id: 'gate_final',

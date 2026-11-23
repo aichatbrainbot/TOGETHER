@@ -2,14 +2,24 @@ import type { SimEventType } from '@together/game-core';
 
 export type SoundCue = SimEventType | 'emote';
 
+const AMBIENT_PROGRESSION = [
+  [146.83, 220.0, 261.63], // Dm7 feel
+  [130.81, 196.0, 246.94], // Cmaj7 feel
+  [116.54, 174.61, 220.0], // Bbmaj7 feel
+  [130.81, 196.0, 233.08], // Cm7 feel
+] as const;
+
 /**
- * Procedural dark-neon Web Audio synthesizer with live volume & mute support.
- * Zero external audio dependencies and zero paid APIs.
+ * Procedural dark-neon Web Audio synthesizer with optional lightweight ambient synth loop.
+ * Zero external audio assets, zero CPU bloat.
  */
 export class SoundEngine {
   private ctx: AudioContext | null = null;
   private muted = false;
+  private musicEnabled = false;
   private masterVolume = 0.7;
+  private musicTimer: ReturnType<typeof setInterval> | null = null;
+  private chordStep = 0;
 
   isMuted(): boolean {
     return this.muted;
@@ -17,6 +27,12 @@ export class SoundEngine {
 
   setMuted(muted: boolean): void {
     this.muted = muted;
+    this.syncMusicLoop();
+  }
+
+  setMusicEnabled(enabled: boolean): void {
+    this.musicEnabled = enabled;
+    this.syncMusicLoop();
   }
 
   setVolume(volume: number): void {
@@ -34,8 +50,48 @@ export class SoundEngine {
       }
     }
     if (this.ctx && this.ctx.state === 'suspended') {
-      void this.ctx.resume().catch(() => {});
+      void this.ctx.resume().then(() => {
+        this.syncMusicLoop();
+      }).catch(() => {});
+    } else {
+      this.syncMusicLoop();
     }
+  }
+
+  dispose(): void {
+    if (this.musicTimer) {
+      clearInterval(this.musicTimer);
+      this.musicTimer = null;
+    }
+    if (this.ctx) {
+      void this.ctx.close().catch(() => {});
+      this.ctx = null;
+    }
+  }
+
+  private syncMusicLoop(): void {
+    const shouldPlay = this.musicEnabled && !this.muted && this.masterVolume > 0.005;
+    if (!shouldPlay) {
+      if (this.musicTimer) {
+        clearInterval(this.musicTimer);
+        this.musicTimer = null;
+      }
+      return;
+    }
+    if (!this.ctx || this.ctx.state !== 'running' || this.musicTimer) return;
+
+    const triggerPad = () => {
+      if (!this.ctx || this.ctx.state !== 'running' || this.muted || !this.musicEnabled) return;
+      const chord = AMBIENT_PROGRESSION[this.chordStep % AMBIENT_PROGRESSION.length]!;
+      this.chordStep += 1;
+      const now = this.ctx.currentTime;
+      for (const freq of chord) {
+        this.ambientNote(freq, 2.9, now);
+      }
+    };
+
+    triggerPad();
+    this.musicTimer = setInterval(triggerPad, 3000);
   }
 
   play(event: SoundCue): void {
@@ -62,6 +118,11 @@ export class SoundEngine {
         this.tone(523.25, 523.25, 0.09, 'triangle', 0.07, now);
         this.tone(783.99, 783.99, 0.14, 'triangle', 0.075, now + 0.07);
         this.tone(1046.5, 1046.5, 0.18, 'sine', 0.07, now + 0.14);
+        break;
+      case 'coin_pickup':
+        this.tone(880, 880, 0.07, 'triangle', 0.075, now);
+        this.tone(1174.66, 1174.66, 0.08, 'triangle', 0.08, now + 0.05);
+        this.tone(1567.98, 1567.98, 0.14, 'sine', 0.075, now + 0.1);
         break;
       case 'switch_on':
         this.tone(520, 680, 0.07, 'square', 0.045, now);
@@ -103,6 +164,26 @@ export class SoundEngine {
         break;
       }
     }
+  }
+
+  private ambientNote(freq: number, durationSec: number, startTime: number): void {
+    if (!this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const vol = Math.max(0.0002, 0.022 * this.masterVolume);
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, startTime);
+
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.linearRampToValueAtTime(vol, startTime + 0.8);
+    gain.gain.linearRampToValueAtTime(vol * 0.65, startTime + durationSec - 0.8);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + durationSec);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(startTime);
+    osc.stop(startTime + durationSec + 0.05);
   }
 
   private tone(
