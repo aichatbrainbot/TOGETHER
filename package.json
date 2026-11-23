@@ -1,0 +1,28 @@
+{
+  "name": "together-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TOGETHER? — Original multiplayer 2D cooperative puzzle-platformer Discord Activity",
+  "scripts": {
+    "dev": "concurrently -n server,web -c magenta,cyan \"pnpm --filter @together/server dev\" \"pnpm --filter @together/web dev\"",
+    "dev:server": "pnpm --filter @together/server dev",
+    "dev:web": "pnpm --filter @together/web dev",
+    "build": "pnpm --filter @together/game-core build && pnpm --filter @together/server build && pnpm --filter @together/web build",
+    "start:activity": "pnpm build && node scripts/start-activity.mjs",
+    "tunnel": "node scripts/tunnel.mjs http://127.0.0.1:3001",
+    "tunnel:dev": "node scripts/tunnel.mjs http://127.0.0.1:5173",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  }
+}

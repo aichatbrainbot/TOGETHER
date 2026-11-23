@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: together-discord-activity
+    runtime: node
+    plan: free
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: node scripts/start-activity.mjs
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: SERVE_STATIC
+        value: "true"
+      - key: ALLOW_DEV_AUTH
+        value: "false"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: VITE_DISCORD_CLIENT_ID
+        sync: false
+      - key: DISCORD_CLIENT_SECRET
+        sync: false
