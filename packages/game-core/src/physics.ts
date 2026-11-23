@@ -920,9 +920,14 @@ export function stepGameWorld(
 
       if (p.vy >= 0 && prevBottom <= other.y + 8 && p.y + PHYSICS.PLAYER_HEIGHT >= other.y) {
         p.y = other.y - PHYSICS.PLAYER_HEIGHT;
-        p.vy = Math.min(0, other.vy);
-        p.grounded = true;
-        p.standingOnId = other.id;
+        // Only grant jump-ready ground state when the teammate below is actually supported (stops infinite mid-air ladder jumping)
+        if (other.grounded) {
+          p.vy = Math.min(0, other.vy);
+          p.grounded = true;
+          p.standingOnId = other.id;
+        } else {
+          p.vy = Math.max(0, other.vy);
+        }
       } else if (
         p.vy < 0 &&
         prevTop >= other.y + PHYSICS.PLAYER_HEIGHT - 8 &&

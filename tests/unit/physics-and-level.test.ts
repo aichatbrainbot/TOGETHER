@@ -5,18 +5,25 @@ import {
   LEVEL_CHAMBER_02,
   LEVEL_CHAMBER_03,
   LEVEL_CHAMBER_04,
+  LEVEL_NIGHTMARE_N1,
+  LEVEL_NIGHTMARE_N2,
+  LEVEL_NIGHTMARE_N3,
+  LEVEL_NIGHTMARE_N4,
   LEVEL_SPECIAL_S1,
   LEVEL_SPECIAL_S2,
   LEVEL_SPECIAL_S3,
   LEVEL_SPECIAL_S4,
+  NIGHTMARE_LEVELS,
   NORMAL_LEVELS,
   PHYSICS,
   SOLO_PUPPET_ID,
   SPECIAL_LEVELS,
   createGameWorld,
   generateProceduralChamber,
+  getLevelUnlockStatus,
   getNextLevelId,
   getSpawnPositionForSlot,
+  getUnlockedLevelIds,
   stepGameWorld,
 } from '@together/game-core';
 import { describe, expect, it } from 'vitest';
@@ -53,14 +60,38 @@ describe('Celeste-grade kinematic physics & Stage 1 cooperative rules', () => {
     }
 
     const jumpHeight = LEVEL_CHAMBER_01.spawnFloorY - highestFeetY;
-    // Exact Celeste-tuned jump height: >= 74 px and < 84 px (strictly below 88 px High Ledge!)
-    expect(jumpHeight).toBeGreaterThanOrEqual(74);
-    expect(jumpHeight).toBeLessThan(84);
+    // Nerfed precision jump height (~65-69 px): clears 64 px shelves cleanly without OP float, well below 88 px High Ledge!
+    expect(jumpHeight).toBeGreaterThanOrEqual(64);
+    expect(jumpHeight).toBeLessThan(72);
     expect(highestFeetY).toBeGreaterThan(296);
 
     // Asymmetric gravity: descent takes fewer ticks than ascent (snappy landing)
     const fallTicks = landTick - apexTick;
     expect(fallTicks).toBeLessThan(apexTick);
+  });
+
+  it('blocks mid-air infinite head-ladder jumping when the bottom player is airborne', () => {
+    const world = createGameWorld([
+      { id: 'p1', displayName: 'AirBase', slot: 0, connected: true },
+      { id: 'p2', displayName: 'Rider', slot: 1, connected: true },
+    ]);
+    const p1 = world.players[0]!;
+    const p2 = world.players[1]!;
+
+    p1.x = 180;
+    p1.y = 260;
+    p1.vy = -40;
+    p1.grounded = false;
+
+    p2.x = 180;
+    p2.y = p1.y - PHYSICS.PLAYER_HEIGHT - 1;
+    p2.vy = 20;
+    p2.grounded = false;
+
+    stepGameWorld(world, {}, LEVEL_CHAMBER_01);
+    expect(p1.grounded).toBe(false);
+    expect(p2.grounded).toBe(false);
+    expect(p2.standingOnId).toBeNull();
   });
 
   it('nudges players up to 5px past ceiling corners during upward jump (Celeste corner correction)', () => {
@@ -431,16 +462,54 @@ describe('Stages 2 & 3 (Fixed bypasses, Timing, Crates) and Procedural Labs', ()
   });
 });
 
-describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invariants', () => {
-  it('registers 4 Normal stages (1-4) and 4 Special stages (S1-S4) in exact progression order', () => {
+describe('Stage 4, Special S1-S4 & Nightmare N1-N4 + Lock Progression', () => {
+  it('registers 12 campaign stages across Standard (1-4), Special (S1-S4) & Nightmare (N1-N4) and enforces lock progression', () => {
     expect(NORMAL_LEVELS.map((l) => l.code)).toEqual(['1', '2', '3', '4']);
     expect(SPECIAL_LEVELS.map((l) => l.code)).toEqual(['S1', 'S2', 'S3', 'S4']);
-    expect(CAMPAIGN_LEVELS).toHaveLength(8);
+    expect(NIGHTMARE_LEVELS.map((l) => l.code)).toEqual(['N1', 'N2', 'N3', 'N4']);
+    expect(CAMPAIGN_LEVELS).toHaveLength(12);
     expect(getNextLevelId(LEVEL_CHAMBER_04.id)).toBe(LEVEL_SPECIAL_S1.id);
     expect(getNextLevelId(LEVEL_SPECIAL_S1.id)).toBe(LEVEL_SPECIAL_S2.id);
     expect(getNextLevelId(LEVEL_SPECIAL_S2.id)).toBe(LEVEL_SPECIAL_S3.id);
     expect(getNextLevelId(LEVEL_SPECIAL_S3.id)).toBe(LEVEL_SPECIAL_S4.id);
-    expect(getNextLevelId(LEVEL_SPECIAL_S4.id)).toBeNull();
+    expect(getNextLevelId(LEVEL_SPECIAL_S4.id)).toBe(LEVEL_NIGHTMARE_N1.id);
+    expect(getNextLevelId(LEVEL_NIGHTMARE_N1.id)).toBe(LEVEL_NIGHTMARE_N2.id);
+    expect(getNextLevelId(LEVEL_NIGHTMARE_N2.id)).toBe(LEVEL_NIGHTMARE_N3.id);
+    expect(getNextLevelId(LEVEL_NIGHTMARE_N3.id)).toBe(LEVEL_NIGHTMARE_N4.id);
+    expect(getNextLevelId(LEVEL_NIGHTMARE_N4.id)).toBeNull();
+
+    // Fresh user: only Standard 1-4 are unlocked; Special, Nightmare, and Procedural Lab are locked
+    const empty = new Set<string>();
+    expect(getUnlockedLevelIds(empty)).toEqual([
+      'chamber-01',
+      'chamber-02',
+      'chamber-03',
+      'chamber-04',
+    ]);
+    expect(getLevelUnlockStatus('stage-s1', empty).unlocked).toBe(false);
+    expect(getLevelUnlockStatus('stage-n1', empty).unlocked).toBe(false);
+    expect(getLevelUnlockStatus('procedural:428109', empty).unlocked).toBe(false);
+
+    // Partial Standard clears still keep Page 2 (S1) and Lab locked
+    const partial = new Set(['chamber-01', 'chamber-02', 'chamber-03']);
+    expect(getLevelUnlockStatus('stage-s1', partial).unlocked).toBe(false);
+    expect(getLevelUnlockStatus('procedural:428109', partial).unlocked).toBe(false);
+
+    // Clearing all Standard 1-4 unlocks S1 and Procedural Lab, but S2 and Nightmare N1 stay locked
+    const normalDone = new Set(['chamber-01', 'chamber-02', 'chamber-03', 'chamber-04']);
+    expect(getLevelUnlockStatus('stage-s1', normalDone).unlocked).toBe(true);
+    expect(getLevelUnlockStatus('procedural:428109', normalDone).unlocked).toBe(true);
+    expect(getLevelUnlockStatus('stage-s2', normalDone).unlocked).toBe(false);
+    expect(getLevelUnlockStatus('stage-n1', normalDone).unlocked).toBe(false);
+
+    // Clearing S1..S4 unlocks N1, and N1..N3 unlock sequentially to N4
+    const specialDone = new Set([...normalDone, 'stage-s1', 'stage-s2', 'stage-s3', 'stage-s4']);
+    expect(getLevelUnlockStatus('stage-n1', specialDone).unlocked).toBe(true);
+    expect(getLevelUnlockStatus('stage-n2', specialDone).unlocked).toBe(false);
+    expect(
+      getLevelUnlockStatus('stage-n4', new Set([...specialDone, 'stage-n1', 'stage-n2', 'stage-n3']))
+        .unlocked,
+    ).toBe(true);
   });
 
   it('Stage 4: verifies Bounce Pad launch (>=132px), Laser hazard + switch disable, Crumbling lifecycle, and Checkpoint respawn', () => {
@@ -563,7 +632,7 @@ describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invaria
   });
 
   it('collects 3 DarkCoins per stage, enforces 2P team switch in co-op, and rejects 24px telekinesis crate push', () => {
-    // 1. All 8 campaign stages ship exactly 3 DarkCoins
+    // 1. All 12 campaign stages ship exactly 3 DarkCoins
     for (const lvl of CAMPAIGN_LEVELS) {
       expect(lvl.coins, `${lvl.id} should define 3 DarkCoins`).toHaveLength(3);
     }
@@ -638,7 +707,7 @@ describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invaria
     expect(afkWorld.status).toBe('playing');
   });
 
-  it('geometric playability invariant: all 8 campaign stages have clean 8P spawns, clear bounce-pad skies, and unobstructed vertical lifts', () => {
+  it('geometric playability invariant: all 12 campaign stages have clean 8P spawns, clear bounce-pad skies, and unobstructed vertical lifts', () => {
     const overlaps = (
       a: { x: number; y: number; w: number; h: number },
       b: { x: number; y: number; w: number; h: number },

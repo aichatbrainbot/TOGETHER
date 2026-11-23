@@ -1708,3 +1708,109 @@ code {
   user-select: none;
   margin-bottom: 0;
 }
+
+/* --- Paginated Stage Pages & Progression Lock Styling --- */
+.stage-pages-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.stage-page-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 6px;
+  border-radius: 10px;
+  border: 1px solid rgba(230, 234, 242, 0.14);
+  background: rgba(27, 30, 41, 0.85);
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.stage-page-tab-top {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.stage-page-tab small {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.stage-page-tab-active {
+  border-color: var(--accent-secondary);
+  background: rgba(84, 214, 197, 0.14);
+  color: #e6eaf2;
+}
+
+.stage-page-tab-nightmare.stage-page-tab-active {
+  border-color: #f43f5e;
+  background: rgba(244, 63, 94, 0.18);
+  color: #fecdd3;
+}
+
+.stage-page-tab-locked {
+  opacity: 0.68;
+}
+
+.stage-page-banner {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stage-page-banner-locked {
+  border-color: rgba(255, 107, 139, 0.36);
+  background: rgba(40, 22, 34, 0.7);
+}
+
+.stage-tier-badge-nightmare {
+  background: rgba(244, 63, 94, 0.18);
+  border-color: rgba(244, 63, 94, 0.55);
+  color: #fda4af;
+}
+
+.stage-code-nightmare {
+  background: rgba(46, 16, 28, 0.9);
+  box-shadow: 0 0 12px rgba(244, 63, 94, 0.28);
+}
+
+.chamber-card-nightmare {
+  background: linear-gradient(135deg, rgba(36, 40, 56, 0.94), rgba(54, 20, 36, 0.76));
+}
+
+.hud-stage-badge-nightmare {
+  box-shadow: 0 0 12px rgba(244, 63, 94, 0.45);
+}
+
+.pill-locked {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  background: rgba(255, 107, 139, 0.14);
+  border: 1px solid rgba(255, 107, 139, 0.42);
+  color: #fda4af;
+}
+
+.stage-page-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+}

@@ -15,28 +15,28 @@ export const PHYSICS = {
   SNAPSHOT_INTERVAL_TICKS: 2, // 30 Hz broadcast
   PLAYER_WIDTH: 18,
   PLAYER_HEIGHT: 24,
-  MOVE_SPEED: 182,
-  GROUND_ACCEL: 1850,
+  MOVE_SPEED: 164,
+  GROUND_ACCEL: 1750,
   GROUND_FRICTION: 2050,
-  AIR_ACCEL: 1280,
-  AIR_FRICTION: 240,
-  GRAVITY: 1315,
-  APEX_GRAVITY_MULTIPLIER: 0.55,
-  APEX_VELOCITY_THRESHOLD: 65,
-  FALL_GRAVITY_MULTIPLIER: 1.45,
+  AIR_ACCEL: 1060,
+  AIR_FRICTION: 290,
+  GRAVITY: 1360,
+  APEX_GRAVITY_MULTIPLIER: 0.88,
+  APEX_VELOCITY_THRESHOLD: 48,
+  FALL_GRAVITY_MULTIPLIER: 1.56,
   LOW_GRAVITY_FACTOR: 0.76,
-  MAX_FALL_SPEED: 660,
-  JUMP_VELOCITY: -456,
-  BOUNCE_VELOCITY: -610,
-  JUMP_CUT_MULTIPLIER: 0.52,
-  JUMP_CUT_THRESHOLD: -150,
-  CORNER_CORRECTION_PX: 5,
-  COYOTE_TICKS: 6, // 100 ms
-  JUMP_BUFFER_TICKS: 6, // 100 ms
-  RESPAWN_INVULN_TICKS: 45,
-  VAULT_CHARGE_TICKS: 15,
-  EXIT_HOLD_TICKS: 10,
-  CRATE_PUSH_SPEED: 96,
+  MAX_FALL_SPEED: 680,
+  JUMP_VELOCITY: -436,
+  BOUNCE_VELOCITY: -624,
+  JUMP_CUT_MULTIPLIER: 0.48,
+  JUMP_CUT_THRESHOLD: -140,
+  CORNER_CORRECTION_PX: 3,
+  COYOTE_TICKS: 4, // 67 ms
+  JUMP_BUFFER_TICKS: 4, // 67 ms
+  RESPAWN_INVULN_TICKS: 30,
+  VAULT_CHARGE_TICKS: 18,
+  EXIT_HOLD_TICKS: 12,
+  CRATE_PUSH_SPEED: 92,
   CRATE_FRICTION: 1250,
   DROP_THROUGH_TICKS: 10,
   AFK_IDLE_TICKS: 1500, // 25s idle excludes AFK teammate from holding Exit Door hostage
@@ -50,7 +50,7 @@ export const INPUT_BITS = {
 } as const;
 
 export type MedalTier = 'gold' | 'silver' | 'bronze';
-export type LevelTier = 'normal' | 'special' | 'procedural';
+export type LevelTier = 'normal' | 'special' | 'nightmare' | 'procedural';
 
 export interface Rect {
   readonly x: number;
@@ -164,7 +164,7 @@ export interface CueLabel {
 
 export interface LevelDefinition {
   readonly id: string;
-  readonly code: string; // '1' | '2' | '3' | '4' | 'S1' | 'S2' | 'S3' | 'S4' | '∞'
+  readonly code: string; // '1'..'4' | 'S1'..'S4' | 'N1'..'N4' | '∞'
   readonly tier: LevelTier;
   readonly difficulty: 1 | 2 | 3 | 4 | 5;
   readonly order: number;

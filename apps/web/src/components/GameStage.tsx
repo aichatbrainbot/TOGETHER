@@ -45,6 +45,7 @@ interface GameStageProps {
   mode: 'discord' | 'local-dev';
   isHost: boolean;
   pingMs: number | null;
+  unlockedLevelIds?: readonly string[];
   settings: GameSettings;
   onUpdateSettings: (patch: Partial<GameSettings>) => void;
   onSetLandscape?: (locked: boolean) => void;
@@ -75,6 +76,7 @@ export function GameStage({
   mode,
   isHost,
   pingMs,
+  unlockedLevelIds,
   settings,
   onUpdateSettings,
   onSetLandscape,
@@ -736,6 +738,11 @@ export function GameStage({
     () => (nextCampaignId ? resolveLevel(nextCampaignId) : null),
     [nextCampaignId],
   );
+  const nextCampaignUnlocked = useMemo(() => {
+    if (!nextCampaignId) return false;
+    if (!unlockedLevelIds) return true;
+    return unlockedLevelIds.includes(nextCampaignId);
+  }, [nextCampaignId, unlockedLevelIds]);
   const isProcedural = world.levelId.startsWith('procedural');
   const displayTimeMs = world.completionTimeMs ?? world.elapsedMs;
   const goldParRemaining =
@@ -760,7 +767,11 @@ export function GameStage({
         <div className="hud-cluster">
           <span
             className={`hud-stage-badge ${
-              activeLevel.tier === 'special' ? 'hud-stage-badge-special' : ''
+              activeLevel.tier === 'special'
+                ? 'hud-stage-badge-special'
+                : activeLevel.tier === 'nightmare'
+                  ? 'hud-stage-badge-nightmare'
+                  : ''
             }`}
             style={{
               borderColor: activeLevel.themeAccent,
@@ -1167,7 +1178,7 @@ export function GameStage({
                   Waiting for Host to launch next stage or return to menu...
                 </p>
               )}
-              {isHost && nextCampaignId && (
+              {isHost && nextCampaignId && nextCampaignUnlocked && (
                 <button
                   type="button"
                   className="btn btn-primary"
@@ -1175,6 +1186,12 @@ export function GameStage({
                 >
                   Next: {nextCampaignLevel?.code ?? 'Stage'} →
                 </button>
+              )}
+              {isHost && nextCampaignId && !nextCampaignUnlocked && (
+                <p className="muted-note" style={{ width: '100%', textAlign: 'center' }}>
+                  Complete all prerequisite Ranked stages to unlock Stage{' '}
+                  <strong>{nextCampaignLevel?.code}</strong>.
+                </p>
               )}
               {isHost && isProcedural && (
                 <button

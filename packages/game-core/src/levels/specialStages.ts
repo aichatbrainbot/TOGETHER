@@ -100,10 +100,10 @@ export const LEVEL_SPECIAL_S1: LevelDefinition = {
     },
     {
       id: 's1_laser_sw',
-      label: '4s GATE',
+      label: '3.3s GATE',
       kind: 'timed',
       accent: 'amber',
-      durationTicks: 240,
+      durationTicks: 200,
       x: 214,
       y: 140,
       w: 44,
@@ -274,10 +274,10 @@ export const LEVEL_SPECIAL_S2: LevelDefinition = {
     },
     {
       id: 's2_timed',
-      label: '4s RUN',
+      label: '3.3s RUN',
       kind: 'timed',
       accent: 'amber',
-      durationTicks: 240,
+      durationTicks: 200,
       x: 444,
       y: 360,
       w: 38,
@@ -630,7 +630,7 @@ export const LEVEL_SPECIAL_S4: LevelDefinition = {
   ],
   bouncePads: [{ id: 's4_pad', x: 352, y: 358, w: 32, h: 10, accent: 'mint' }],
   crumblePlatforms: [
-    { id: 's4_crumble', x: 582, y: 368, w: 52, h: 14, delayTicks: 46, respawnTicks: 130 },
+    { id: 's4_crumble', x: 582, y: 368, w: 52, h: 14, delayTicks: 38, respawnTicks: 120 },
   ],
   lasers: [
     {

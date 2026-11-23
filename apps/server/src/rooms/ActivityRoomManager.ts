@@ -16,7 +16,9 @@ import {
   computeSoloFollowButtons,
   createGameWorld,
   createPlayerEntity,
+  getLevelUnlockStatus,
   getPaletteForSlot,
+  getUnlockedLevelIds,
   normalizeProceduralSeed,
   resolveLevel,
   respawnPlayerAtCheckpoint,
@@ -87,7 +89,7 @@ export interface JoinFailure {
 
 export type ActionResult =
   | { ok: true }
-  | { ok: false; code: 'NOT_IN_ROOM' | 'NOT_HOST'; message: string };
+  | { ok: false; code: 'NOT_IN_ROOM' | 'NOT_HOST' | 'LEVEL_LOCKED'; message: string };
 
 const IMMEDIATE_EVENT_TYPES = new Set<SimEvent['type']>([
   'bounce',
@@ -363,6 +365,14 @@ export class ActivityRoomManager {
     }
 
     const resolved = resolveLevel(params.levelId, params.proceduralSeed);
+    const unlockStatus = getLevelUnlockStatus(resolved.id, this.getRoomClearedLevelIds(room));
+    if (!unlockStatus.unlocked) {
+      return {
+        ok: false,
+        code: 'LEVEL_LOCKED',
+        message: unlockStatus.requirementText || 'This stage is currently locked.',
+      };
+    }
     room.selectedLevelId = resolved.id;
     room.selectedSeed = resolved.proceduralSeed ?? null;
     if (params.modifier) {
@@ -393,8 +403,20 @@ export class ActivityRoomManager {
       return { ok: false, code: 'NOT_HOST', message: 'Only the room host can start the level.' };
     }
 
+    const requestedLevelId = options.levelId ?? room.selectedLevelId;
+    const requestedSeed = options.levelId
+      ? options.proceduralSeed
+      : (options.proceduralSeed ?? room.selectedSeed);
+    const resolved = resolveLevel(requestedLevelId, requestedSeed);
+    const unlockStatus = getLevelUnlockStatus(resolved.id, this.getRoomClearedLevelIds(room));
+    if (!unlockStatus.unlocked) {
+      return {
+        ok: false,
+        code: 'LEVEL_LOCKED',
+        message: unlockStatus.requirementText || 'This stage is currently locked.',
+      };
+    }
     if (options.levelId) {
-      const resolved = resolveLevel(options.levelId, options.proceduralSeed);
       room.selectedLevelId = resolved.id;
       room.selectedSeed = resolved.proceduralSeed ?? null;
     }
@@ -881,7 +903,29 @@ export class ActivityRoomManager {
     return connected[0] ?? null;
   }
 
+  private getRoomClearedLevelIds(room: ManagedRoom): Set<string> {
+    const cleared = new Set<string>();
+    for (const cl of room.sessionClears) {
+      if (cl.modifier !== 'low_gravity') {
+        cleared.add(cl.levelId);
+      }
+    }
+    if (this.statsStore) {
+      for (const p of room.players.values()) {
+        if (!p.connected) continue;
+        const prof = this.statsStore.getPlayerProfile(p.id);
+        if (prof) {
+          for (const lvlId of Object.keys(prof.bestTimesByLevel)) {
+            cleared.add(lvlId);
+          }
+        }
+      }
+    }
+    return cleared;
+  }
+
   private serializeRoom(room: ManagedRoom): ActivityRoomState {
+    const clearedIds = this.getRoomClearedLevelIds(room);
     const players: ActivityPlayer[] = Array.from(room.players.values())
       .sort((a, b) => a.slot - b.slot)
       .map((p) => ({
@@ -914,6 +958,7 @@ export class ActivityRoomManager {
       createdAt: room.createdAt,
       players,
       sessionClears: room.sessionClears,
+      unlockedLevelIds: getUnlockedLevelIds(clearedIds),
     };
   }
 

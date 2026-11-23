@@ -395,7 +395,7 @@ export function App() {
     );
   }
 
-  // Full-Screen Gameplay Stage (Stages 1-4, S1-S4 & Procedural Labs)
+  // Full-Screen Gameplay Stage (Stages 1-4, S1-S4, N1-N4 & Procedural Labs)
   if (room?.phase === 'playing' && world) {
     return (
       <main className="game-viewport-root">
@@ -408,6 +408,7 @@ export function App() {
           mode={context.mode}
           isHost={Boolean(selfPlayer?.isHost)}
           pingMs={pingMs}
+          unlockedLevelIds={room.unlockedLevelIds}
           settings={settings}
           onUpdateSettings={handleUpdateSettings}
           onSetLandscape={context.setLandscapeOrientation}

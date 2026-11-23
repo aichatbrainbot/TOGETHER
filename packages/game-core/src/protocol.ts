@@ -65,6 +65,7 @@ export const ActivityRoomStateSchema = z.object({
   createdAt: z.number().int().nonnegative(),
   players: z.array(ActivityPlayerSchema),
   sessionClears: z.array(SessionClearSummarySchema),
+  unlockedLevelIds: z.array(z.string()).optional(),
 });
 export type ActivityRoomState = z.infer<typeof ActivityRoomStateSchema>;
 
@@ -322,6 +323,7 @@ export const ErrorCodeSchema = z.enum([
   'ROOM_FULL',
   'NOT_IN_ROOM',
   'NOT_HOST',
+  'LEVEL_LOCKED',
   'RATE_LIMITED',
   'SERVER_ERROR',
 ]);

@@ -477,4 +477,37 @@ describe('Discord Activity Multiplayer Server Integration', () => {
     }
     expect(sawRespawn).toBe(true);
   });
+
+  it('locks Special, Nightmare, and Procedural pages on the server until prerequisites are cleared', async () => {
+    const { httpBase, wsProxyUrl } = await bootServer();
+    const hostAuth = await exchangeToken(httpBase, 'code_alice');
+    const host = await TestWsClient.connect(wsProxyUrl);
+    openClients.push(host);
+
+    host.send({
+      type: 'join_instance',
+      instanceId: 'inst-lock-test',
+      sessionToken: hostAuth.json.sessionToken,
+    });
+    const welcome = await host.nextMessage();
+    expect(welcome.type).toBe('welcome');
+    if (welcome.type === 'welcome') {
+      expect(welcome.room.unlockedLevelIds).toEqual([
+        'chamber-01',
+        'chamber-02',
+        'chamber-03',
+        'chamber-04',
+      ]);
+    }
+
+    for (const lockedId of ['stage-s1', 'stage-n1', 'procedural:428109']) {
+      host.send({ type: 'select_level', levelId: lockedId });
+      const err = await host.nextMessage();
+      expect(err).toMatchObject({ type: 'error', code: 'LEVEL_LOCKED' });
+
+      host.send({ type: 'start_game', levelId: lockedId });
+      const startErr = await host.nextMessage();
+      expect(startErr).toMatchObject({ type: 'error', code: 'LEVEL_LOCKED' });
+    }
+  });
 });

@@ -1,13 +1,16 @@
 import {
   type ActivityPlayer,
   type ActivityRoomState,
+  CAMPAIGN_LEVELS,
   CHALLENGE_MODIFIERS,
   type ChallengeModifier,
   type LeaderboardEntry,
   type LevelDefinition,
+  NIGHTMARE_LEVELS,
   NORMAL_LEVELS,
   type PlayerProfileStats,
   SPECIAL_LEVELS,
+  getLevelUnlockStatus,
   normalizeProceduralSeed,
   resolveLevel,
 } from '@together/game-core';
@@ -22,6 +25,7 @@ import {
   DiceIcon,
   InfoIcon,
   InviteIcon,
+  LockIcon,
   PlayIcon,
   SettingsIcon,
   SignalIcon,
@@ -68,6 +72,44 @@ interface GameMenuProps {
 }
 
 type ActivePanel = null | 'squad' | 'chambers' | 'leaderboard' | 'settings' | 'howto';
+type StagePageId = 'normal' | 'special' | 'nightmare' | 'procedural';
+
+const STAGE_PAGES: readonly {
+  readonly id: StagePageId;
+  readonly pageNumber: number;
+  readonly label: string;
+  readonly codes: string;
+  readonly description: string;
+}[] = [
+  {
+    id: 'normal',
+    pageNumber: 1,
+    label: 'Page 1 · Standard',
+    codes: '1 · 2 · 3 · 4',
+    description: 'Core cooperative fundamentals. Clear all 4 Ranked to unlock Special & Lab pages.',
+  },
+  {
+    id: 'special',
+    pageNumber: 2,
+    label: 'Page 2 · Special',
+    codes: 'S1 · S2 · S3 · S4',
+    description: 'High-pressure relay trials. Stages unlock sequentially in Ranked mode.',
+  },
+  {
+    id: 'nightmare',
+    pageNumber: 3,
+    label: 'Page 3 · Nightmare',
+    codes: 'N1 · N2 · N3 · N4',
+    description: 'Master precision gauntlets with tight timing, lasers, and co-op sync.',
+  },
+  {
+    id: 'procedural',
+    pageNumber: 4,
+    label: 'Page 4 · Endless Lab',
+    codes: '∞ SEEDED',
+    description: 'Deterministic seeded co-op chambers generated mathematically per seed.',
+  },
+];
 
 function formatMs(ms: number): string {
   const totalSec = ms / 1000;
@@ -96,6 +138,7 @@ export function GameMenu({
   onReconnect,
 }: GameMenuProps) {
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
+  const [stagePage, setStagePage] = useState<StagePageId>('normal');
   const [seedInput, setSeedInput] = useState<string>(() =>
     String(room?.selectedSeed ?? 428109),
   );
@@ -114,6 +157,44 @@ export function GameMenu({
     [room?.selectedLevelId, room?.selectedSeed],
   );
   const activeModifier: ChallengeModifier = room?.modifier ?? 'standard';
+
+  const clearedLevelIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (profile?.bestTimesByLevel) {
+      for (const id of Object.keys(profile.bestTimesByLevel)) {
+        ids.add(id);
+      }
+    }
+    for (const cl of room?.sessionClears ?? []) {
+      if (cl.modifier !== 'low_gravity') {
+        ids.add(cl.levelId);
+      }
+    }
+    return ids;
+  }, [profile, room?.sessionClears]);
+
+  const serverUnlockedSet = useMemo(
+    () => (room?.unlockedLevelIds ? new Set(room.unlockedLevelIds) : null),
+    [room?.unlockedLevelIds],
+  );
+
+  const getStageLock = (levelId: string) => {
+    const fallback = getLevelUnlockStatus(levelId, clearedLevelIds);
+    if (!serverUnlockedSet) return fallback;
+    const isProc = levelId.startsWith('procedural');
+    const isUnlocked = isProc ? serverUnlockedSet.has('procedural') : serverUnlockedSet.has(levelId);
+    if (isUnlocked) return { unlocked: true, requirementText: '' };
+    return {
+      unlocked: false,
+      requirementText: fallback.requirementText || 'Clear prerequisite stages (Ranked) to unlock',
+    };
+  };
+
+  const unlockedCampaignCount = useMemo(
+    () => CAMPAIGN_LEVELS.filter((lvl) => getStageLock(lvl.id).unlocked).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [clearedLevelIds, serverUnlockedSet],
+  );
 
   // Fetch player progression profile on mount so stage cards display medals, best times & DarkCoins
   useEffect(() => {
@@ -188,6 +269,9 @@ export function GameMenu({
   const renderStageCard = (lvl: LevelDefinition) => {
     const isSelected = selectedLevel.id === lvl.id;
     const isSpecial = lvl.tier === 'special';
+    const isNightmare = lvl.tier === 'nightmare';
+    const lockInfo = getStageLock(lvl.id);
+    const isLocked = !lockInfo.unlocked;
     const bestTime = profile?.bestTimesByLevel?.[lvl.id];
     const bestMedal = profile?.bestMedalsByLevel?.[lvl.id];
     const bestCoins = profile?.bestCoinsByLevel?.[lvl.id] ?? 0;
@@ -198,15 +282,19 @@ export function GameMenu({
         key={lvl.id}
         className={`chamber-card surface ${isSelected ? 'chamber-card-live' : ''} ${
           isSpecial ? 'chamber-card-special' : ''
+        } ${isNightmare ? 'chamber-card-nightmare' : ''} ${
+          isLocked ? 'chamber-card-locked' : ''
         }`}
       >
         <div className="chamber-card-head">
           <div className="chamber-title-group">
             <span
-              className={`stage-code-pill ${isSpecial ? 'stage-code-special' : ''}`}
+              className={`stage-code-pill ${isSpecial ? 'stage-code-special' : ''} ${
+                isNightmare ? 'stage-code-nightmare' : ''
+              }`}
               style={{
-                borderColor: lvl.themeAccent,
-                color: lvl.themeAccent,
+                borderColor: isLocked ? 'rgba(147, 155, 178, 0.45)' : lvl.themeAccent,
+                color: isLocked ? '#939BB2' : lvl.themeAccent,
               }}
             >
               {lvl.code}
@@ -214,14 +302,21 @@ export function GameMenu({
             <strong>{lvl.title}</strong>
           </div>
           <div className="chamber-badges-right">
-            {bestMedal && (
-              <span className={`pill pill-medal-${bestMedal}`} title="Best Ranked Medal">
-                {bestMedal.toUpperCase()}
+            {isLocked ? (
+              <span className="pill pill-locked">
+                <LockIcon width={12} height={12} />
+                LOCKED
               </span>
+            ) : (
+              bestMedal && (
+                <span className={`pill pill-medal-${bestMedal}`} title="Best Ranked Medal">
+                  {bestMedal.toUpperCase()}
+                </span>
+              )
             )}
             <span
               className="difficulty-stars"
-              style={{ color: lvl.themeAccent }}
+              style={{ color: isLocked ? '#6c748d' : lvl.themeAccent }}
               title={`Difficulty ${lvl.difficulty}/5`}
             >
               {renderDifficultyStars(lvl.difficulty)}
@@ -233,12 +328,14 @@ export function GameMenu({
           <div className="chamber-meta-tags">
             <span className="pill pill-accent">{lvl.mechanicTag}</span>
             <span className="log-time">
-              {bestTime !== undefined
-                ? `Best ${formatMs(bestTime)} · ${bestCoins}/${totalCoins} Coins`
-                : `Par ${formatMs(lvl.parTimeMs.gold)} · ${totalCoins} Coins`}
+              {isLocked
+                ? lockInfo.requirementText
+                : bestTime !== undefined
+                  ? `Best ${formatMs(bestTime)} · ${bestCoins}/${totalCoins} Coins`
+                  : `Par ${formatMs(lvl.parTimeMs.gold)} · ${totalCoins} Coins`}
             </span>
           </div>
-          {isHost && (
+          {isHost && !isLocked && (
             <div className="chamber-card-btns">
               {!isSelected && (
                 <button
@@ -393,12 +490,22 @@ export function GameMenu({
           <button
             type="button"
             className={`menu-btn ${activePanel === 'chambers' ? 'menu-btn-active' : ''}`}
-            onClick={() => setActivePanel(activePanel === 'chambers' ? null : 'chambers')}
+            onClick={() => {
+              if (activePanel !== 'chambers') {
+                const tier = selectedLevel.tier;
+                setStagePage(
+                  tier === 'special' || tier === 'nightmare' || tier === 'procedural'
+                    ? tier
+                    : 'normal',
+                );
+              }
+              setActivePanel(activePanel === 'chambers' ? null : 'chambers');
+            }}
           >
             <span className="menu-btn-icon">
               <ChambersIcon />
             </span>
-            <span className="menu-btn-label">Stages (1–4 · S1–S4)</span>
+            <span className="menu-btn-label">Stage Pages (12 + Lab)</span>
             <span className="menu-btn-badge">{selectedLevel.code}</span>
           </button>
 
@@ -496,7 +603,7 @@ export function GameMenu({
               <h2>
                 {activePanel === 'squad' &&
                   `Squad Lobby (${connectedPlayers.length}/${room?.maxPlayers ?? 8})`}
-                {activePanel === 'chambers' && 'Stages (1–4 & Special S1–S4)'}
+                {activePanel === 'chambers' && `Stage Pages · ${unlockedCampaignCount}/12 Unlocked`}
                 {activePanel === 'leaderboard' && 'Leaderboard & Profile'}
                 {activePanel === 'settings' && 'Settings & Display'}
                 {activePanel === 'howto' && 'How to Play'}
@@ -650,106 +757,227 @@ export function GameMenu({
               </div>
             )}
 
-            {activePanel === 'chambers' && (
-              <div className="drawer-body">
-                {!isHost && (
-                  <p className="muted-note">
-                    Only the Host (<strong>{hostPlayer?.displayName ?? 'Host'}</strong>) can change
-                    the active stage and modifier.
-                  </p>
-                )}
+            {activePanel === 'chambers' && (() => {
+              const pageIndex = STAGE_PAGES.findIndex((p) => p.id === stagePage);
+              const pageMeta = STAGE_PAGES[Math.max(0, pageIndex)]!;
+              const pageLevels =
+                stagePage === 'normal'
+                  ? NORMAL_LEVELS
+                  : stagePage === 'special'
+                    ? SPECIAL_LEVELS
+                    : stagePage === 'nightmare'
+                      ? NIGHTMARE_LEVELS
+                      : [];
+              const labLock = getStageLock('procedural:428109');
+              const pageLocked =
+                stagePage === 'special'
+                  ? !getStageLock(SPECIAL_LEVELS[0]!.id).unlocked
+                  : stagePage === 'nightmare'
+                    ? !getStageLock(NIGHTMARE_LEVELS[0]!.id).unlocked
+                    : stagePage === 'procedural'
+                      ? !labLock.unlocked
+                      : false;
+              const pageUnlockNote =
+                stagePage === 'special'
+                  ? getStageLock(SPECIAL_LEVELS[0]!.id).requirementText
+                  : stagePage === 'nightmare'
+                    ? getStageLock(NIGHTMARE_LEVELS[0]!.id).requirementText
+                    : stagePage === 'procedural'
+                      ? labLock.requirementText
+                      : '';
+              const clearedOnPage = pageLevels.filter((lvl) => clearedLevelIds.has(lvl.id)).length;
 
-                <div className="stage-tier-header">
-                  <span className="stage-tier-title">Standard Stages</span>
-                  <span className="stage-tier-badge">1 · 2 · 3 · 4</span>
-                </div>
-                {NORMAL_LEVELS.map(renderStageCard)}
+              return (
+                <div className="drawer-body">
+                  {!isHost && (
+                    <p className="muted-note">
+                      Only the Host (<strong>{hostPlayer?.displayName ?? 'Host'}</strong>) can
+                      launch or switch stages.
+                    </p>
+                  )}
 
-                <div className="stage-tier-header stage-tier-header-special">
-                  <span className="stage-tier-title">Special Stages</span>
-                  <span className="stage-tier-badge stage-tier-badge-special">
-                    S1 · S2 · S3 · S4
-                  </span>
-                </div>
-                {SPECIAL_LEVELS.map(renderStageCard)}
-
-                {/* Deterministic Procedural Lab */}
-                <div
-                  className={`chamber-card surface ${
-                    selectedLevel.id.startsWith('procedural:') ? 'chamber-card-live' : ''
-                  }`}
-                >
-                  <div className="chamber-card-head">
-                    <div className="chamber-title-group">
-                      <span className="stage-code-pill">∞</span>
-                      <strong>Procedural Lab</strong>
-                    </div>
-                    <span className="pill pill-mint">SEEDED</span>
+                  {/* Page Switcher Tabs */}
+                  <div className="stage-pages-tabs" role="tablist" aria-label="Stage Pages">
+                    {STAGE_PAGES.map((pg) => {
+                      const isPgLocked =
+                        pg.id === 'special'
+                          ? !getStageLock(SPECIAL_LEVELS[0]!.id).unlocked
+                          : pg.id === 'nightmare'
+                            ? !getStageLock(NIGHTMARE_LEVELS[0]!.id).unlocked
+                            : pg.id === 'procedural'
+                              ? !labLock.unlocked
+                              : false;
+                      return (
+                        <button
+                          key={pg.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={stagePage === pg.id}
+                          className={`stage-page-tab ${
+                            stagePage === pg.id ? 'stage-page-tab-active' : ''
+                          } ${pg.id === 'nightmare' ? 'stage-page-tab-nightmare' : ''} ${
+                            isPgLocked ? 'stage-page-tab-locked' : ''
+                          }`}
+                          onClick={() => setStagePage(pg.id)}
+                        >
+                          <span className="stage-page-tab-top">
+                            <span>P{pg.pageNumber}</span>
+                            {isPgLocked && <LockIcon width={11} height={11} />}
+                          </span>
+                          <small>{pg.id.toUpperCase()}</small>
+                        </button>
+                      );
+                    })}
                   </div>
-                  <p className="muted-note">
-                    Deterministic seeded generator combining stacking, moving ferries, crates, keys,
-                    and vault plates. Same seed = same chamber for everyone.
-                  </p>
-                  <div className="seed-row">
-                    <input
-                      type="text"
-                      className="seed-input"
-                      value={seedInput}
-                      maxLength={12}
-                      disabled={!isHost}
-                      onChange={(e) => setSeedInput(e.target.value)}
-                      aria-label="Procedural seed"
-                      placeholder="Seed (e.g. 428109)"
-                    />
+
+                  {/* Active Page Header Banner */}
+                  <div
+                    className={`stage-page-banner surface ${
+                      pageLocked ? 'stage-page-banner-locked' : ''
+                    }`}
+                  >
+                    <div className="stage-tier-header" style={{ padding: 0 }}>
+                      <span className="stage-tier-title">{pageMeta.label}</span>
+                      <span
+                        className={`stage-tier-badge ${
+                          stagePage === 'special'
+                            ? 'stage-tier-badge-special'
+                            : stagePage === 'nightmare'
+                              ? 'stage-tier-badge-nightmare'
+                              : ''
+                        }`}
+                      >
+                        {pageLocked
+                          ? 'LOCKED'
+                          : pageLevels.length > 0
+                            ? `${clearedOnPage}/${pageLevels.length} Cleared`
+                            : pageMeta.codes}
+                      </span>
+                    </div>
+                    <p className="muted-note">
+                      {pageLocked ? pageUnlockNote : pageMeta.description}
+                    </p>
+                  </div>
+
+                  {/* Active Page Stage List */}
+                  {stagePage !== 'procedural' ? (
+                    pageLevels.map(renderStageCard)
+                  ) : (
+                    <div
+                      className={`chamber-card surface ${
+                        selectedLevel.id.startsWith('procedural:') ? 'chamber-card-live' : ''
+                      } ${!labLock.unlocked ? 'chamber-card-locked' : ''}`}
+                    >
+                      <div className="chamber-card-head">
+                        <div className="chamber-title-group">
+                          <span className="stage-code-pill">∞</span>
+                          <strong>Procedural Lab</strong>
+                        </div>
+                        {labLock.unlocked ? (
+                          <span className="pill pill-mint">SEEDED</span>
+                        ) : (
+                          <span className="pill pill-locked">
+                            <LockIcon width={12} height={12} />
+                            LOCKED
+                          </span>
+                        )}
+                      </div>
+                      <p className="muted-note">
+                        {labLock.unlocked
+                          ? 'Deterministic seeded generator combining stacking, moving ferries, crates, keys, and vault plates. Same seed = same chamber for everyone.'
+                          : labLock.requirementText}
+                      </p>
+                      <div className="seed-row">
+                        <input
+                          type="text"
+                          className="seed-input"
+                          value={seedInput}
+                          maxLength={12}
+                          disabled={!isHost || !labLock.unlocked}
+                          onChange={(e) => setSeedInput(e.target.value)}
+                          aria-label="Procedural seed"
+                          placeholder="Seed (e.g. 428109)"
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-compact"
+                          disabled={!isHost || !labLock.unlocked}
+                          onClick={handleRandomSeed}
+                          title="Randomize seed"
+                        >
+                          <DiceIcon />
+                        </button>
+                        {isHost && labLock.unlocked && (
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-compact"
+                            onClick={handleLaunchProcedural}
+                          >
+                            Play Seed
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Prev / Next Page Controls */}
+                  <div className="stage-page-pager">
                     <button
                       type="button"
                       className="btn btn-secondary btn-compact"
-                      disabled={!isHost}
-                      onClick={handleRandomSeed}
-                      title="Randomize seed"
+                      disabled={pageIndex <= 0}
+                      onClick={() => setStagePage(STAGE_PAGES[Math.max(0, pageIndex - 1)]!.id)}
                     >
-                      <DiceIcon />
+                      ← Prev Page
                     </button>
-                    {isHost && (
-                      <button
-                        type="button"
-                        className="btn btn-primary btn-compact"
-                        onClick={handleLaunchProcedural}
-                      >
-                        Play Seed
-                      </button>
-                    )}
+                    <span className="log-time">
+                      Page {pageMeta.pageNumber} / {STAGE_PAGES.length}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-compact"
+                      disabled={pageIndex >= STAGE_PAGES.length - 1}
+                      onClick={() =>
+                        setStagePage(
+                          STAGE_PAGES[Math.min(STAGE_PAGES.length - 1, pageIndex + 1)]!.id,
+                        )
+                      }
+                    >
+                      Next Page →
+                    </button>
                   </div>
-                </div>
 
-                {/* Challenge Modifiers */}
-                <div className="drawer-section">
-                  <h3 className="section-title">Challenge Modifier</h3>
-                  <div className="modifier-grid">
-                    {CHALLENGE_MODIFIERS.map((mod) => (
-                      <button
-                        key={mod.id}
-                        type="button"
-                        disabled={!isHost}
-                        className={`modifier-chip surface ${
-                          activeModifier === mod.id ? 'modifier-chip-active' : ''
-                        }`}
-                        onClick={() =>
-                          onSelectLevel({
-                            levelId: selectedLevel.id,
-                            proceduralSeed: selectedLevel.proceduralSeed,
-                            modifier: mod.id,
-                          })
-                        }
-                      >
-                        <strong>{mod.name}</strong>
-                        <span>{mod.description}</span>
-                      </button>
-                    ))}
+                  {/* Challenge Modifiers */}
+                  <div className="drawer-section">
+                    <h3 className="section-title">
+                      Challenge Modifier (Only Ranked unlocks new pages)
+                    </h3>
+                    <div className="modifier-grid">
+                      {CHALLENGE_MODIFIERS.map((mod) => (
+                        <button
+                          key={mod.id}
+                          type="button"
+                          disabled={!isHost}
+                          className={`modifier-chip surface ${
+                            activeModifier === mod.id ? 'modifier-chip-active' : ''
+                          }`}
+                          onClick={() =>
+                            onSelectLevel({
+                              levelId: selectedLevel.id,
+                              proceduralSeed: selectedLevel.proceduralSeed,
+                              modifier: mod.id,
+                            })
+                          }
+                        >
+                          <strong>{mod.name}</strong>
+                          <span>{mod.description}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {activePanel === 'leaderboard' && (
               <div className="drawer-body">
@@ -796,6 +1024,10 @@ export function GameMenu({
                     { id: 'stage-s2', label: 'S2' },
                     { id: 'stage-s3', label: 'S3' },
                     { id: 'stage-s4', label: 'S4' },
+                    { id: 'stage-n1', label: 'N1' },
+                    { id: 'stage-n2', label: 'N2' },
+                    { id: 'stage-n3', label: 'N3' },
+                    { id: 'stage-n4', label: 'N4' },
                     { id: 'procedural', label: 'Labs' },
                   ].map((f) => (
                     <button
@@ -993,12 +1225,13 @@ export function GameMenu({
                   </p>
                 </div>
                 <div className="surface howto-item">
-                  <strong>Special Stages (S1 · S2 · S3 · S4) &amp; DarkCoins</strong>
+                  <strong>Locked Pages: Special (S1–S4), Nightmare (N1–N4) &amp; Lab</strong>
                   <p className="muted-note">
-                    Each stage hides <code>3 DarkCoins</code> for 100% mastery! Special stages add
-                    skyline towers (<strong>S1</strong>), dual lasers &amp; 2P team locks (
-                    <strong>S2</strong>), crate foundry engineering (<strong>S3</strong>), and the
-                    master finale (<strong>S4</strong>).
+                    Each stage hides <code>3 DarkCoins</code>! Clear Standard <code>1–4</code> Ranked
+                    to unlock <strong>Page 2 (S1–S4)</strong> and <strong>Procedural Lab</strong>,
+                    then conquer <code>S1 → S4</code> Ranked to unlock{' '}
+                    <strong>Page 3 Nightmare (N1–N4)</strong>! Jumping is precision-tuned — no free
+                    mid-air escapes!
                   </p>
                 </div>
               </div>
