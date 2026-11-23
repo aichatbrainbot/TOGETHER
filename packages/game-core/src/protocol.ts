@@ -113,6 +113,7 @@ export const SimPlayerStateSchema = z.object({
   dropThroughTicks: z.number().int().optional(),
   prevJumpDown: z.boolean(),
   invulnTicks: z.number().int(),
+  idleTicks: z.number().int().nonnegative().optional(),
   atExit: z.boolean(),
   lastProcessedSeq: z.number().int(),
 });

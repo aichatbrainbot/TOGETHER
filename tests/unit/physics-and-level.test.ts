@@ -613,6 +613,29 @@ describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invaria
     c3World.players[0]!.y = 384 - PHYSICS.PLAYER_HEIGHT;
     stepGameWorld(c3World, { p1: { buttons: INPUT_BITS.RIGHT } }, LEVEL_CHAMBER_03);
     expect(light.x).toBeCloseTo(startCrateX, 2);
+
+    // 5. Long-idle (AFK >= 1500 ticks) teammate does not lock Exit Door for active squadmates, and rejoins when moving!
+    const afkWorld = createGameWorld(
+      [
+        { id: 'p1', displayName: 'Active', slot: 0, connected: true },
+        { id: 'p2', displayName: 'AFK', slot: 1, connected: true },
+      ],
+      { level: LEVEL_CHAMBER_02 },
+    );
+    afkWorld.exitDoor.unlocked = true;
+    afkWorld.players[0]!.x = LEVEL_CHAMBER_02.exitDoor.x + 10;
+    afkWorld.players[0]!.y = LEVEL_CHAMBER_02.exitDoor.y + LEVEL_CHAMBER_02.exitDoor.h - PHYSICS.PLAYER_HEIGHT;
+    afkWorld.players[1]!.idleTicks = PHYSICS.AFK_IDLE_TICKS;
+
+    stepGameWorld(afkWorld, { p1: { buttons: INPUT_BITS.RIGHT } }, LEVEL_CHAMBER_02);
+    expect(afkWorld.exitDoor.playersRequired).toBe(1);
+    expect(afkWorld.exitDoor.playersInside).toBe(1);
+
+    // As soon as AFK player sends any input, idleTicks resets & 2 players are required again
+    stepGameWorld(afkWorld, { p1: { buttons: INPUT_BITS.RIGHT }, p2: { buttons: INPUT_BITS.LEFT } }, LEVEL_CHAMBER_02);
+    expect(afkWorld.players[1]!.idleTicks).toBe(0);
+    expect(afkWorld.exitDoor.playersRequired).toBe(2);
+    expect(afkWorld.status).toBe('playing');
   });
 
   it('geometric playability invariant: all 8 campaign stages have clean 8P spawns, clear bounce-pad skies, and unobstructed vertical lifts', () => {

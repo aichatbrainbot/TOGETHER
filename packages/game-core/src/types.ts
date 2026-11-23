@@ -39,6 +39,7 @@ export const PHYSICS = {
   CRATE_PUSH_SPEED: 96,
   CRATE_FRICTION: 1250,
   DROP_THROUGH_TICKS: 10,
+  AFK_IDLE_TICKS: 1500, // 25s idle excludes AFK teammate from holding Exit Door hostage
 } as const;
 
 export const INPUT_BITS = {
@@ -247,6 +248,7 @@ export interface SimPlayerState {
   dropThroughTicks?: number;
   prevJumpDown: boolean;
   invulnTicks: number;
+  idleTicks?: number;
   atExit: boolean;
   lastProcessedSeq: number;
 }

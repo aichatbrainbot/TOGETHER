@@ -201,6 +201,7 @@ export function createPlayerEntity(level: LevelDefinition, seed: SimPlayerSeed):
     dropThroughTicks: 0,
     prevJumpDown: false,
     invulnTicks: 0,
+    idleTicks: 0,
     atExit: false,
     lastProcessedSeq: 0,
   };
@@ -569,6 +570,12 @@ export function stepGameWorld(
     const buttons = input ? input.buttons : 0;
     if (input?.seq !== undefined && input.seq > p.lastProcessedSeq) {
       p.lastProcessedSeq = input.seq;
+    }
+
+    if (buttons !== 0 || world.soloPractice || p.isSoloPuppet) {
+      p.idleTicks = 0;
+    } else {
+      p.idleTicks = (p.idleTicks ?? 0) + 1;
     }
 
     const moveLeft = (buttons & INPUT_BITS.LEFT) !== 0;
@@ -995,11 +1002,11 @@ export function stepGameWorld(
     const sw2 = def.alsoDisabledBySwitchId ? switchById.get(def.alsoDisabledBySwitchId) : undefined;
     const disabled = Boolean(
       sw1?.pressed ||
-        sw1?.latched ||
-        (sw1 && sw1.remainingTicks > 0) ||
-        sw2?.pressed ||
-        sw2?.latched ||
-        (sw2 && sw2.remainingTicks > 0),
+      sw1?.latched ||
+      (sw1 && sw1.remainingTicks > 0) ||
+      sw2?.pressed ||
+      sw2?.latched ||
+      (sw2 && sw2.remainingTicks > 0),
     );
     state.active = !disabled;
   }
@@ -1176,11 +1183,11 @@ export function stepGameWorld(
     const sw2 = def.alsoDisabledBySwitchId ? freshSwitchById.get(def.alsoDisabledBySwitchId) : undefined;
     state.active = !Boolean(
       sw1?.pressed ||
-        sw1?.latched ||
-        (sw1 && sw1.remainingTicks > 0) ||
-        sw2?.pressed ||
-        sw2?.latched ||
-        (sw2 && sw2.remainingTicks > 0),
+      sw1?.latched ||
+      (sw1 && sw1.remainingTicks > 0) ||
+      sw2?.pressed ||
+      sw2?.latched ||
+      (sw2 && sw2.remainingTicks > 0),
     );
   }
 
@@ -1256,7 +1263,7 @@ export function stepGameWorld(
     }
   }
 
-  // 15. Exit Door Win Condition
+  // 15. Exit Door Win Condition (long-AFK teammates >=25s do not block squad clear!)
   let insideCount = 0;
   for (const p of world.players) {
     if (!p.connected) {
@@ -1267,13 +1274,17 @@ export function stepGameWorld(
     if (p.atExit) insideCount += 1;
   }
 
-  world.exitDoor.playersInside = insideCount;
-  world.exitDoor.playersRequired = Math.max(1, activePlayers.length);
+  const nonIdlePlayers = activePlayers.filter((p) => (p.idleTicks ?? 0) < PHYSICS.AFK_IDLE_TICKS);
+  const requiredParticipants = nonIdlePlayers.length > 0 ? nonIdlePlayers : activePlayers;
+  const requiredInsideCount = requiredParticipants.filter((p) => p.atExit).length;
+
+  world.exitDoor.playersInside = Math.min(insideCount, requiredParticipants.length);
+  world.exitDoor.playersRequired = Math.max(1, requiredParticipants.length);
 
   if (
     world.exitDoor.unlocked &&
-    activePlayers.length > 0 &&
-    insideCount === activePlayers.length
+    requiredParticipants.length > 0 &&
+    requiredInsideCount === requiredParticipants.length
   ) {
     world.exitDoor.exitHoldTicks += 1;
     if (world.exitDoor.exitHoldTicks >= PHYSICS.EXIT_HOLD_TICKS) {

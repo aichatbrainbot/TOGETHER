@@ -40,6 +40,7 @@ interface PlayerJuiceState {
   wasGrounded: boolean;
   lastVy: number;
   runDustTimer: number;
+  flashTimer: number;
   trail: [TrailPoint, TrailPoint, TrailPoint];
   trailTimer: number;
 }
@@ -84,7 +85,8 @@ export class GameRenderer {
   }));
   private readonly juiceByPlayerId = new Map<string, PlayerJuiceState>();
   private animTime = 0;
-  private shakeMag = 0;
+  private trauma = 0;
+  private coinSparkleTimer = 0;
 
   private staticCache: HTMLCanvasElement | null = null;
   private staticCacheKey = '';
@@ -93,8 +95,9 @@ export class GameRenderer {
     this.burst(x, y, color, 5, 44, -26, 0.24, 180);
   }
 
-  triggerShake(magnitude: number): void {
-    this.shakeMag = Math.max(this.shakeMag, Math.min(6, magnitude));
+  triggerShake(traumaAmount: number): void {
+    // Trauma accumulates cleanly up to 1.0 (Squirrel Eiserloh Game-Feel formula)
+    this.trauma = Math.min(1, this.trauma + Math.max(0, traumaAmount));
   }
 
   spawnEventParticles(events: readonly SimEvent[], ignoreJumpForId?: string): void {
@@ -111,11 +114,12 @@ export class GameRenderer {
         case 'bounce':
           this.burst(ev.x, ev.y, color, 14, 92, -118, 0.4, 240);
           this.spawnRing(ev.x, ev.y, color, 26, 0.32);
-          this.triggerShake(2.8);
+          this.triggerShake(0.45);
+          if (ev.playerId) this.triggerPlayerFlash(ev.playerId, 0.08);
           break;
         case 'crumble':
           this.burst(ev.x, ev.y, '#FFB84D', 12, 85, -35, 0.44, 340);
-          this.triggerShake(1.8);
+          this.triggerShake(0.28);
           break;
         case 'checkpoint':
           this.burst(ev.x, ev.y, '#4FF0D6', 18, 95, -95, 0.55, 220);
@@ -124,6 +128,7 @@ export class GameRenderer {
         case 'coin_pickup':
           this.burst(ev.x, ev.y, '#FFE066', 14, 96, -86, 0.46, 200);
           this.spawnRing(ev.x, ev.y, '#FFE066', 24, 0.34);
+          if (ev.playerId) this.triggerPlayerFlash(ev.playerId, 0.07);
           break;
         case 'switch_on':
           this.burst(ev.x, ev.y, color, 8, 65, -55, 0.32, 240);
@@ -140,32 +145,38 @@ export class GameRenderer {
         case 'gate_unlock':
           this.burst(ev.x, ev.y, color, 18, 105, -65, 0.52, 240);
           this.spawnRing(ev.x, ev.y, color, 34, 0.4);
-          this.triggerShake(3.2);
+          this.triggerShake(0.5);
           break;
         case 'door_unlock':
           this.burst(ev.x, ev.y, '#4FF0D6', 22, 115, -70, 0.58, 220);
           this.spawnRing(ev.x, ev.y, '#4FF0D6', 42, 0.48);
-          this.triggerShake(3.5);
+          this.triggerShake(0.55);
           break;
         case 'respawn':
           this.burst(ev.x, ev.y, '#FF4D6D', 16, 100, -65, 0.45, 280);
           this.spawnRing(ev.x, ev.y, '#FF4D6D', 26, 0.34);
-          this.triggerShake(4.2);
+          this.triggerShake(0.65);
+          if (ev.playerId) this.triggerPlayerFlash(ev.playerId, 0.08);
           break;
         case 'level_complete':
           this.burst(ev.x, ev.y, '#A28BFF', 24, 145, -105, 0.82, 190);
           this.burst(ev.x, ev.y, '#4FF0D6', 24, 145, -115, 0.88, 190);
           this.spawnRing(ev.x, ev.y, '#4FF0D6', 54, 0.55);
-          this.triggerShake(4.0);
+          this.triggerShake(0.6);
           break;
       }
     }
   }
 
+  private triggerPlayerFlash(playerId: string, durationSec: number): void {
+    const j = this.juiceByPlayerId.get(playerId);
+    if (j) j.flashTimer = Math.max(j.flashTimer, durationSec);
+  }
+
   resetEffects(): void {
     for (const pt of this.pool) pt.active = false;
     this.juiceByPlayerId.clear();
-    this.shakeMag = 0;
+    this.trauma = 0;
   }
 
   render(
@@ -201,10 +212,34 @@ export class GameRenderer {
     this.animTime += reducedMotion ? dtSec * 0.25 : dtSec;
     this.updateParticles(dtSec);
 
-    if (reducedMotion || this.shakeMag < 0.1) {
-      this.shakeMag = 0;
-    } else {
-      this.shakeMag *= Math.exp(-18 * dtSec);
+    if (reducedMotion) {
+      this.trauma = 0;
+    } else if (this.trauma > 0) {
+      this.trauma = Math.max(0, this.trauma - 2.6 * dtSec);
+    }
+
+    // Gentle ambient sparkles on uncollected DarkCoins
+    if (!reducedMotion && (level.coins?.length ?? 0) > 0) {
+      this.coinSparkleTimer += dtSec;
+      if (this.coinSparkleTimer >= 0.38) {
+        this.coinSparkleTimer = 0;
+        const coinDefs = level.coins!;
+        const coinRt = world.coins ?? [];
+        for (let i = 0; i < coinDefs.length; i += 1) {
+          if (coinRt[i]?.collected) continue;
+          const cd = coinDefs[i]!;
+          this.spawnSingleParticle(
+            cd.x + (Math.random() - 0.5) * 12,
+            cd.y + (Math.random() - 0.5) * 10,
+            (Math.random() - 0.5) * 14,
+            -22 - Math.random() * 14,
+            2,
+            '#FFF5B8',
+            0.38,
+            -10,
+          );
+        }
+      }
     }
 
     ctx.save();
@@ -225,12 +260,13 @@ export class GameRenderer {
 
     const drawW = level.width * scaleX;
     const drawH = level.height * scaleY;
-    const shakeX = this.shakeMag > 0 ? Math.round((Math.random() - 0.5) * 2 * this.shakeMag) : 0;
-    const shakeY = this.shakeMag > 0 ? Math.round((Math.random() - 0.5) * 2 * this.shakeMag) : 0;
+    const shake = this.trauma * this.trauma;
+    const shakeX = shake > 0.005 ? Math.round(8 * shake * Math.sin(this.animTime * 48 * 1.7)) : 0;
+    const shakeY = shake > 0.005 ? Math.round(6 * shake * Math.cos(this.animTime * 48 * 2.3)) : 0;
     const offsetX = Math.floor((viewW - drawW) / 2) + shakeX;
     const offsetY = Math.floor((viewH - drawH) / 2) + shakeY;
 
-    if (offsetX > 0 || offsetY > 0 || drawW < viewW || drawH < viewH || this.shakeMag > 0) {
+    if (offsetX > 0 || offsetY > 0 || drawW < viewW || drawH < viewH || shake > 0.005) {
       ctx.fillStyle = '#090B12';
       ctx.fillRect(0, 0, viewW, viewH);
     }
@@ -350,6 +386,7 @@ export class GameRenderer {
         wasGrounded: pose.grounded,
         lastVy: pose.vy,
         runDustTimer: 0,
+        flashTimer: 0,
         trail: [
           { x: pose.x, y: pose.y, alpha: 0 },
           { x: pose.x, y: pose.y, alpha: 0 },
@@ -360,9 +397,14 @@ export class GameRenderer {
       this.juiceByPlayerId.set(player.id, j);
     }
 
+    if (j.flashTimer > 0) {
+      j.flashTimer = Math.max(0, j.flashTimer - dtSec);
+    }
+
     if (reducedMotion || !player.connected) {
       j.scaleX = 1;
       j.scaleY = 1;
+      j.flashTimer = 0;
       j.wasGrounded = pose.grounded;
       return j;
     }
@@ -1251,7 +1293,7 @@ export class GameRenderer {
     ctx.fillRect(lx + 1, ly + h - 4, 7, 5);
     ctx.fillRect(lx + w - 8, ly + h - 4, 7, 5);
 
-    ctx.fillStyle = player.color;
+    ctx.fillStyle = juice.flashTimer > 0 && !opts.reducedMotion ? '#FFFFFF' : player.color;
     ctx.fillRect(lx + 1, ly + 1, w - 2, bodyH - 2);
     ctx.fillRect(lx, ly + 3, w, bodyH - 6);
 
@@ -1285,9 +1327,11 @@ export class GameRenderer {
 
     ctx.restore();
 
-    const label = player.isSoloPuppet
+    const isAfk = (player.idleTicks ?? 0) >= PHYSICS.AFK_IDLE_TICKS;
+    const baseName = player.isSoloPuppet
       ? `${player.badge} · SOLO`
       : `${player.badge} · ${player.displayName.slice(0, 10)}`;
+    const label = isAfk ? `${baseName} (AFK)` : baseName;
     ctx.font = '800 9px monospace';
     ctx.textAlign = 'center';
     const centerX = px + w / 2;
