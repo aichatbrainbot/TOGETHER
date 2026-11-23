@@ -22,19 +22,14 @@ An original multiplayer 2D cooperative puzzle-platformer built specifically for 
 - `tests/` — Vitest unit tests, multiplayer WebSocket integration tests, and 8-player concurrent stress test.
 - `docs/` — [Plan](./docs/plan.md), [Architecture](./docs/architecture.md), [Networking](./docs/networking.md), [Discord Setup](./docs/discord-setup.md), [Deployment](./docs/deployment.md), and [PostgreSQL Schema](./docs/postgres-schema.sql).
 
-## Quickstart
+## Quickstart (One Command)
 ```bash
 pnpm install
 cp .env.example .env
 # Add VITE_DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET to .env (never commit .env!)
-pnpm build
-pnpm test
-pnpm start:activity
+pnpm play
 ```
 
-Expose locally for free (no account or credit card required):
-```bash
-pnpm tunnel
-```
+`pnpm play` builds the project, starts the Activity server, opens the free Cloudflare Quick Tunnel, and copies your live `*.trycloudflare.com` hostname straight to your clipboard (`Ctrl+V` into Discord Developer Portal → Activities → URL Mappings `PREFIX: /`). Press `Ctrl+C` to stop everything cleanly (or double-click `play.cmd` on Windows).
 
 Then configure Discord Developer Portal following [docs/discord-setup.md](./docs/discord-setup.md).

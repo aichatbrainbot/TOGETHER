@@ -8,6 +8,7 @@
     "dev:server": "pnpm --filter @together/server dev",
     "dev:web": "pnpm --filter @together/web dev",
     "build": "pnpm --filter @together/game-core build && pnpm --filter @together/server build && pnpm --filter @together/web build",
+    "play": "node scripts/play.mjs",
     "start:activity": "pnpm build && node scripts/start-activity.mjs",
     "tunnel": "node scripts/tunnel.mjs http://127.0.0.1:3001",
     "tunnel:dev": "node scripts/tunnel.mjs http://127.0.0.1:5173",
