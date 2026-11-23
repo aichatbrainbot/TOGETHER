@@ -2,7 +2,9 @@ import {
   ACTIVITY_LIMITS,
   type ActivityRoomState,
   type C2SMessage,
+  type GameWorldState,
   type RoomUpdateReason,
+  type SimEvent,
   parseS2CMessage,
 } from '@together/game-core';
 
@@ -10,7 +12,12 @@ export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'dis
 
 export interface ActivitySocketCallbacks {
   onConnectionChange: (state: ConnectionState) => void;
-  onRoomUpdate: (room: ActivityRoomState, reason: RoomUpdateReason | 'welcome', reconnected?: boolean) => void;
+  onRoomUpdate: (
+    room: ActivityRoomState,
+    reason: RoomUpdateReason | 'welcome',
+    reconnected?: boolean,
+  ) => void;
+  onGameSnapshot: (world: GameWorldState, events: SimEvent[]) => void;
   onPingUpdate: (rttMs: number) => void;
   onError: (code: string, message: string) => void;
 }
@@ -71,9 +78,15 @@ export class ActivitySocketClient {
         case 'welcome':
           this.callbacks.onConnectionChange('connected');
           this.callbacks.onRoomUpdate(msg.room, 'welcome', msg.reconnected);
+          if (msg.world) {
+            this.callbacks.onGameSnapshot(msg.world, []);
+          }
           break;
         case 'room_state':
           this.callbacks.onRoomUpdate(msg.room, msg.reason);
+          break;
+        case 'game_snapshot':
+          this.callbacks.onGameSnapshot(msg.world, msg.events);
           break;
         case 'pong': {
           const rtt = Math.max(0, Math.round(performance.now() - msg.clientTime));
@@ -107,12 +120,32 @@ export class ActivitySocketClient {
     });
 
     ws.addEventListener('error', () => {
-      // Browser fires close immediately after error; reconnect is scheduled there.
+      // Close event handles reconnect scheduling.
     });
   }
 
   setReady(ready: boolean): void {
     this.send({ type: 'set_ready', ready });
+  }
+
+  startGame(): void {
+    this.send({ type: 'start_game' });
+  }
+
+  sendInput(seq: number, buttons: number): void {
+    this.send({ type: 'input', seq, buttons });
+  }
+
+  swapSoloPuppet(): void {
+    this.send({ type: 'swap_solo_puppet' });
+  }
+
+  restartLevel(): void {
+    this.send({ type: 'restart_level' });
+  }
+
+  returnLobby(): void {
+    this.send({ type: 'return_lobby' });
   }
 
   reconnectNow(): void {

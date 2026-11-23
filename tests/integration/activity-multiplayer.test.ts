@@ -388,4 +388,72 @@ describe('Discord Activity Multiplayer Server Integration', () => {
       expect(content).not.toContain('TOP_SECRET_DO_NOT_LEAK');
     }
   });
+
+  it('runs 60Hz authoritative multiplayer gameplay snapshots for 2+ users and solo puppet swap', async () => {
+    const { httpBase, wsProxyUrl } = await bootServer();
+    const aliceAuth = await exchangeToken(httpBase, 'code_alice');
+    const bobAuth = await exchangeToken(httpBase, 'code_bob');
+
+    const alice = await TestWsClient.connect(wsProxyUrl);
+    openClients.push(alice);
+
+    alice.send({
+      type: 'join_instance',
+      instanceId: 'inst-gameplay-1',
+      sessionToken: aliceAuth.json.sessionToken,
+    });
+    await alice.nextMessage();
+
+    // Solo start spawns swappable partner puppet
+    alice.send({ type: 'start_game' });
+
+    let snap = await alice.nextMessage();
+    while (snap.type !== 'game_snapshot') snap = await alice.nextMessage();
+    expect(snap.world.soloPractice).toBe(true);
+    expect(snap.world.players).toHaveLength(2);
+
+    // Swap active solo puppet
+    alice.send({ type: 'swap_solo_puppet' });
+    let swapSnap = await alice.nextMessage();
+    while (swapSnap.type !== 'game_snapshot' || swapSnap.world.soloActiveId !== '__solo_partner__') {
+      swapSnap = await alice.nextMessage();
+    }
+    expect(swapSnap.world.soloActiveId).toBe('__solo_partner__');
+
+    // Bob joins mid-game -> seamlessly converts Solo Practice to real 2-player co-op!
+    const bob = await TestWsClient.connect(wsProxyUrl);
+    openClients.push(bob);
+    bob.send({
+      type: 'join_instance',
+      instanceId: 'inst-gameplay-1',
+      sessionToken: bobAuth.json.sessionToken,
+    });
+    const bobWelcome = await bob.nextMessage();
+    expect(bobWelcome.type).toBe('welcome');
+    if (bobWelcome.type === 'welcome') {
+      expect(bobWelcome.world?.soloPractice).toBe(false);
+      expect(bobWelcome.world?.players.map((p) => p.displayName)).toEqual(['Alice', 'Bob']);
+    }
+
+    // Bob holds RIGHT input -> Alice receives synchronized game_snapshot showing Bob moved right!
+    const bobInitialX =
+      bobWelcome.type === 'welcome'
+        ? (bobWelcome.world?.players.find((p) => p.displayName === 'Bob')?.x ?? 0)
+        : 0;
+
+    bob.send({ type: 'input', seq: 1, buttons: 2 }); // INPUT_BITS.RIGHT = 2
+
+    let aliceSawBobMove = false;
+    for (let i = 0; i < 20; i += 1) {
+      const msg = await alice.nextMessage();
+      if (msg.type === 'game_snapshot') {
+        const bobEntity = msg.world.players.find((p) => p.displayName === 'Bob');
+        if (bobEntity && bobEntity.x > bobInitialX + 5) {
+          aliceSawBobMove = true;
+          break;
+        }
+      }
+    }
+    expect(aliceSawBobMove).toBe(true);
+  });
 });

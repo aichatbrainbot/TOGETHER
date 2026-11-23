@@ -2,10 +2,19 @@ import {
   ACTIVITY_LIMITS,
   type ActivityPlayer,
   type ActivityRoomState,
+  type GameWorldState,
+  LEVEL_CHAMBER_01,
+  PHYSICS,
+  type PlayerTickInput,
   type RoomUpdateReason,
   type S2CMessage,
+  SOLO_PUPPET_ID,
+  type SimEvent,
+  createGameWorld,
+  createPlayerEntity,
   getPaletteForSlot,
   sanitizeDisplayName,
+  stepGameWorld,
 } from '@together/game-core';
 import type { WebSocket } from 'ws';
 import type { VerifiedSessionUser } from '../auth/sessionToken.js';
@@ -35,6 +44,12 @@ interface ManagedRoom {
   hostId: string | null;
   createdAt: number;
   players: Map<string, ManagedPlayer>;
+  world: GameWorldState | null;
+  inputs: Map<string, PlayerTickInput>;
+  pendingEvents: SimEvent[];
+  simTimer: ReturnType<typeof setInterval> | null;
+  lastStepTimeMs: number;
+  accumulatorMs: number;
 }
 
 interface SocketBinding {
@@ -47,6 +62,7 @@ export interface JoinResult {
   playerId: string;
   reconnected: boolean;
   room: ActivityRoomState;
+  world: GameWorldState | null;
 }
 
 export interface JoinFailure {
@@ -54,6 +70,17 @@ export interface JoinFailure {
   code: 'ROOM_FULL';
   message: string;
 }
+
+export type ActionResult =
+  | { ok: true }
+  | { ok: false; code: 'NOT_IN_ROOM' | 'NOT_HOST'; message: string };
+
+const IMMEDIATE_EVENT_TYPES = new Set<SimEvent['type']>([
+  'bridge_lock',
+  'door_unlock',
+  'respawn',
+  'level_complete',
+]);
 
 export class ActivityRoomManager {
   private readonly rooms = new Map<string, ManagedRoom>();
@@ -82,6 +109,10 @@ export class ActivityRoomManager {
     return room ? this.serializeRoom(room) : null;
   }
 
+  getWorldState(instanceId: string): GameWorldState | null {
+    return this.rooms.get(instanceId)?.world ?? null;
+  }
+
   getBinding(socket: WebSocket): SocketBinding | undefined {
     return this.socketBindings.get(socket);
   }
@@ -96,7 +127,6 @@ export class ActivityRoomManager {
     const { instanceId, channelId, guildId, user, socket } = params;
     const now = Date.now();
 
-    // If this socket was previously bound elsewhere, clean it up first.
     if (this.socketBindings.has(socket)) {
       this.handleDisconnect(socket);
     }
@@ -111,6 +141,12 @@ export class ActivityRoomManager {
         hostId: null,
         createdAt: now,
         players: new Map(),
+        world: null,
+        inputs: new Map(),
+        pendingEvents: [],
+        simTimer: null,
+        lastStepTimeMs: now,
+        accumulatorMs: 0,
       };
       this.rooms.set(instanceId, room);
     } else {
@@ -126,7 +162,6 @@ export class ActivityRoomManager {
         existing.graceTimer = null;
       }
 
-      // Close any superseded live socket cleanly without firing disconnect logic for the player.
       if (existing.socket && existing.socket !== socket) {
         const oldSocket = existing.socket;
         this.socketBindings.delete(oldSocket);
@@ -147,20 +182,33 @@ export class ActivityRoomManager {
         room.hostId = existing.id;
       }
 
+      if (room.world) {
+        const simPlayer = room.world.players.find((p) => p.id === existing.id);
+        if (simPlayer) {
+          simPlayer.connected = true;
+          simPlayer.displayName = existing.displayName;
+        }
+      }
+
       this.socketBindings.set(socket, { instanceId, playerId: existing.id });
 
       const serialized = this.serializeRoom(room);
-      this.broadcast(room, {
-        type: 'room_state',
-        reason: wasDisconnected ? 'reconnect' : 'sync',
-        room: serialized,
-      }, socket);
+      this.broadcast(
+        room,
+        {
+          type: 'room_state',
+          reason: wasDisconnected ? 'reconnect' : 'sync',
+          room: serialized,
+        },
+        socket,
+      );
 
       return {
         ok: true,
         playerId: existing.id,
         reconnected: wasDisconnected,
         room: serialized,
+        world: room.world,
       };
     }
 
@@ -196,20 +244,48 @@ export class ActivityRoomManager {
       room.hostId = player.id;
     }
 
+    // If a match is already running (e.g., Solo Practice), seamlessly add this real Discord player!
+    if (room.world && room.phase === 'playing') {
+      if (room.world.soloPractice) {
+        room.world.soloPractice = false;
+        room.world.soloActiveId = null;
+        room.world.players = room.world.players.filter((p) => !p.isSoloPuppet);
+        room.inputs.delete(SOLO_PUPPET_ID);
+      }
+      room.world.players.push(
+        createPlayerEntity(LEVEL_CHAMBER_01, {
+          id: player.id,
+          displayName: player.displayName,
+          slot: player.slot,
+          connected: true,
+        }),
+      );
+      room.world.players.sort((a, b) => a.slot - b.slot);
+    }
+
     this.socketBindings.set(socket, { instanceId, playerId: player.id });
 
     const serialized = this.serializeRoom(room);
-    this.broadcast(room, {
-      type: 'room_state',
-      reason: 'join',
-      room: serialized,
-    }, socket);
+    this.broadcast(
+      room,
+      {
+        type: 'room_state',
+        reason: 'join',
+        room: serialized,
+      },
+      socket,
+    );
+
+    if (room.world && room.phase === 'playing') {
+      this.broadcastSnapshot(room, [], socket);
+    }
 
     return {
       ok: true,
       playerId: player.id,
       reconnected: false,
       room: serialized,
+      world: room.world,
     };
   }
 
@@ -233,6 +309,123 @@ export class ActivityRoomManager {
     return serialized;
   }
 
+  startGame(socket: WebSocket): ActionResult {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) {
+      return { ok: false, code: 'NOT_IN_ROOM', message: 'Join an Activity instance first.' };
+    }
+    const room = this.rooms.get(binding.instanceId);
+    if (!room) {
+      return { ok: false, code: 'NOT_IN_ROOM', message: 'Activity room not found.' };
+    }
+    if (room.hostId !== binding.playerId) {
+      return { ok: false, code: 'NOT_HOST', message: 'Only the room host can start the level.' };
+    }
+
+    this.initLevelWorld(room);
+    room.phase = 'playing';
+
+    this.broadcast(room, {
+      type: 'room_state',
+      reason: 'game_started',
+      room: this.serializeRoom(room),
+    });
+    this.broadcastSnapshot(room, []);
+    this.startSimulationLoop(room);
+
+    return { ok: true };
+  }
+
+  restartLevel(socket: WebSocket): ActionResult {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) {
+      return { ok: false, code: 'NOT_IN_ROOM', message: 'Join an Activity instance first.' };
+    }
+    const room = this.rooms.get(binding.instanceId);
+    if (!room || room.phase !== 'playing') {
+      return { ok: false, code: 'NOT_IN_ROOM', message: 'No active level to restart.' };
+    }
+
+    this.initLevelWorld(room);
+    this.broadcast(room, {
+      type: 'room_state',
+      reason: 'game_restarted',
+      room: this.serializeRoom(room),
+    });
+    this.broadcastSnapshot(room, []);
+    this.startSimulationLoop(room);
+    return { ok: true };
+  }
+
+  returnToLobby(socket: WebSocket): ActionResult {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) {
+      return { ok: false, code: 'NOT_IN_ROOM', message: 'Join an Activity instance first.' };
+    }
+    const room = this.rooms.get(binding.instanceId);
+    if (!room) {
+      return { ok: false, code: 'NOT_IN_ROOM', message: 'Activity room not found.' };
+    }
+    if (room.hostId !== binding.playerId) {
+      return { ok: false, code: 'NOT_HOST', message: 'Only the room host can return to lobby.' };
+    }
+
+    this.stopSimulationLoop(room);
+    room.phase = 'lobby';
+    room.world = null;
+    room.inputs.clear();
+    room.pendingEvents = [];
+    for (const p of room.players.values()) {
+      p.ready = false;
+    }
+
+    this.broadcast(room, {
+      type: 'room_state',
+      reason: 'returned_lobby',
+      room: this.serializeRoom(room),
+    });
+    return { ok: true };
+  }
+
+  queueInput(socket: WebSocket, seq: number, buttons: number): boolean {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) return false;
+    const room = this.rooms.get(binding.instanceId);
+    if (!room || room.phase !== 'playing' || !room.world) return false;
+
+    const targetId =
+      room.world.soloPractice && room.world.soloActiveId
+        ? room.world.soloActiveId
+        : binding.playerId;
+
+    const prev = room.inputs.get(targetId);
+    if (prev?.seq !== undefined && seq < prev.seq) {
+      return true;
+    }
+    room.inputs.set(targetId, { buttons, seq });
+    return true;
+  }
+
+  swapSoloPuppet(socket: WebSocket): boolean {
+    const binding = this.socketBindings.get(socket);
+    if (!binding) return false;
+    const room = this.rooms.get(binding.instanceId);
+    if (!room || room.phase !== 'playing' || !room.world || !room.world.soloPractice) return false;
+
+    const realConnectedCount = Array.from(room.players.values()).filter((p) => p.connected).length;
+    if (realConnectedCount !== 1) return false;
+
+    const current = room.world.soloActiveId ?? binding.playerId;
+    const next = current === binding.playerId ? SOLO_PUPPET_ID : binding.playerId;
+
+    // Release input on the parked character so it stops cleanly where left.
+    room.inputs.set(current, { buttons: 0 });
+    room.inputs.set(next, { buttons: 0 });
+    room.world.soloActiveId = next;
+    this.broadcastSnapshot(room, []);
+    return true;
+  }
+
   handleDisconnect(socket: WebSocket): void {
     const binding = this.socketBindings.get(socket);
     if (!binding) return;
@@ -244,13 +437,21 @@ export class ActivityRoomManager {
     const player = room.players.get(binding.playerId);
     if (!player) return;
 
-    // Only mark disconnected if this socket is still the player's active socket.
     if (player.socket !== socket) return;
 
     player.socket = null;
     player.connected = false;
     player.ready = false;
     player.disconnectedAt = Date.now();
+    room.inputs.delete(player.id);
+
+    if (room.world) {
+      const simPlayer = room.world.players.find((p) => p.id === player.id);
+      if (simPlayer) {
+        simPlayer.connected = false;
+        simPlayer.vx = 0;
+      }
+    }
 
     let reason: RoomUpdateReason = 'disconnect';
     if (room.hostId === player.id) {
@@ -279,6 +480,7 @@ export class ActivityRoomManager {
 
   dispose(): void {
     for (const room of this.rooms.values()) {
+      this.stopSimulationLoop(room);
       for (const player of room.players.values()) {
         if (player.graceTimer) {
           clearTimeout(player.graceTimer);
@@ -288,6 +490,107 @@ export class ActivityRoomManager {
     }
     this.rooms.clear();
     this.socketBindings.clear();
+  }
+
+  private initLevelWorld(room: ManagedRoom): void {
+    const orderedPlayers = Array.from(room.players.values()).sort((a, b) => a.slot - b.slot);
+    const connectedCount = orderedPlayers.filter((p) => p.connected).length;
+    const soloPractice = connectedCount === 1;
+
+    room.world = createGameWorld(
+      orderedPlayers.map((p) => ({
+        id: p.id,
+        displayName: p.displayName,
+        slot: p.slot,
+        connected: p.connected,
+      })),
+      {
+        level: LEVEL_CHAMBER_01,
+        soloPractice,
+      },
+    );
+    room.inputs.clear();
+    room.pendingEvents = [];
+    room.lastStepTimeMs = Date.now();
+    room.accumulatorMs = 0;
+  }
+
+  private startSimulationLoop(room: ManagedRoom): void {
+    this.stopSimulationLoop(room);
+    room.lastStepTimeMs = Date.now();
+    room.accumulatorMs = 0;
+
+    const stepMs = 1000 / PHYSICS.TICK_RATE;
+    room.simTimer = setInterval(() => {
+      if (!room.world || room.phase !== 'playing') {
+        this.stopSimulationLoop(room);
+        return;
+      }
+
+      const now = Date.now();
+      const delta = Math.min(100, Math.max(0, now - room.lastStepTimeMs));
+      room.lastStepTimeMs = now;
+      room.accumulatorMs += delta;
+
+      let stepsRun = 0;
+      let forceBroadcast = false;
+
+      while (room.accumulatorMs >= stepMs && stepsRun < 4) {
+        room.accumulatorMs -= stepMs;
+        stepsRun += 1;
+
+        const inputRecord: Record<string, PlayerTickInput | undefined> = {};
+        for (const [id, inp] of room.inputs.entries()) {
+          inputRecord[id] = inp;
+        }
+
+        const tickEvents = stepGameWorld(room.world, inputRecord, LEVEL_CHAMBER_01);
+        if (tickEvents.length > 0) {
+          room.pendingEvents.push(...tickEvents);
+          if (tickEvents.some((e) => IMMEDIATE_EVENT_TYPES.has(e.type))) {
+            forceBroadcast = true;
+          }
+        }
+
+        if (room.world.status === 'completed') {
+          forceBroadcast = true;
+          break;
+        }
+      }
+
+      if (
+        stepsRun > 0 &&
+        (forceBroadcast || room.world.tick % PHYSICS.SNAPSHOT_INTERVAL_TICKS === 0)
+      ) {
+        const events = room.pendingEvents.splice(0);
+        this.broadcastSnapshot(room, events);
+      }
+
+      if (room.world.status === 'completed') {
+        this.stopSimulationLoop(room);
+      }
+    }, 16);
+  }
+
+  private stopSimulationLoop(room: ManagedRoom): void {
+    if (room.simTimer) {
+      clearInterval(room.simTimer);
+      room.simTimer = null;
+    }
+  }
+
+  private broadcastSnapshot(room: ManagedRoom, events: SimEvent[], exclude?: WebSocket): void {
+    if (!room.world) return;
+    this.broadcast(
+      room,
+      {
+        type: 'game_snapshot',
+        serverTime: Date.now(),
+        world: room.world,
+        events,
+      },
+      exclude,
+    );
   }
 
   private evictDisconnectedPlayer(instanceId: string, playerId: string): void {
@@ -303,6 +606,11 @@ export class ActivityRoomManager {
     }
 
     room.players.delete(playerId);
+    room.inputs.delete(playerId);
+
+    if (room.world) {
+      room.world.players = room.world.players.filter((p) => p.id !== playerId);
+    }
 
     if (room.hostId === playerId) {
       const nextHost = this.pickNextHost(room);
@@ -310,6 +618,7 @@ export class ActivityRoomManager {
     }
 
     if (room.players.size === 0) {
+      this.stopSimulationLoop(room);
       this.rooms.delete(instanceId);
       return;
     }

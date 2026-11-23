@@ -71,7 +71,7 @@ export async function createActivityServer(options: {
     return {
       ok: true,
       app: 'TOGETHER?',
-      phase: 1,
+      phase: 2,
       platform: 'discord-activity',
       discordConfigured: Boolean(config.discordClientId && config.discordClientSecret),
       devAuthEnabled: config.allowDevAuth,
@@ -234,7 +234,7 @@ export async function createActivityServer(options: {
         msgCount = 0;
       }
       msgCount += 1;
-      if (msgCount > 40) {
+      if (msgCount > 120) {
         sendError(socket, 'RATE_LIMITED', 'Too many messages sent. Slow down.');
         return;
       }
@@ -291,6 +291,7 @@ export async function createActivityServer(options: {
             playerId: result.playerId,
             reconnected: result.reconnected,
             room: result.room,
+            world: result.world,
           });
           return;
         }
@@ -298,6 +299,35 @@ export async function createActivityServer(options: {
           const updated = roomManager.setReady(socket, message.ready);
           if (!updated) {
             sendError(socket, 'NOT_IN_ROOM', 'Join an Activity instance before updating ready state.');
+          }
+          return;
+        }
+        case 'start_game': {
+          const res = roomManager.startGame(socket);
+          if (!res.ok) {
+            sendError(socket, res.code, res.message);
+          }
+          return;
+        }
+        case 'input': {
+          roomManager.queueInput(socket, message.seq, message.buttons);
+          return;
+        }
+        case 'swap_solo_puppet': {
+          roomManager.swapSoloPuppet(socket);
+          return;
+        }
+        case 'restart_level': {
+          const res = roomManager.restartLevel(socket);
+          if (!res.ok) {
+            sendError(socket, res.code, res.message);
+          }
+          return;
+        }
+        case 'return_lobby': {
+          const res = roomManager.returnToLobby(socket);
+          if (!res.ok) {
+            sendError(socket, res.code, res.message);
           }
           return;
         }

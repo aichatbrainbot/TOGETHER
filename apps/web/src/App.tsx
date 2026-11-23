@@ -1,5 +1,6 @@
-import type { ActivityPlayer, ActivityRoomState } from '@together/game-core';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ActivityPlayer, ActivityRoomState, GameWorldState, SimEvent } from '@together/game-core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { GameStage } from './components/GameStage.js';
 import { PixelAvatarCanvas } from './components/PixelAvatarCanvas.js';
 import {
   type ActivitySessionContext,
@@ -36,6 +37,9 @@ export function App() {
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [room, setRoom] = useState<ActivityRoomState | null>(null);
+  const [world, setWorld] = useState<GameWorldState | null>(null);
+  const [latestEvents, setLatestEvents] = useState<SimEvent[]>([]);
+  const [eventBatchId, setEventBatchId] = useState<number>(0);
   const [pingMs, setPingMs] = useState<number | null>(null);
   const [socketError, setSocketError] = useState<string | null>(null);
   const [eventLog, setEventLog] = useState<ActivityEventLogItem[]>([]);
@@ -43,10 +47,10 @@ export function App() {
   const socketRef = useRef<ActivitySocketClient | null>(null);
   const logSeqRef = useRef(0);
 
-  const pushLog = (text: string) => {
+  const pushLog = useCallback((text: string) => {
     logSeqRef.current += 1;
     setEventLog((prev) => [{ id: logSeqRef.current, text, time: formatTime() }, ...prev].slice(0, 8));
-  };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -99,6 +103,9 @@ export function App() {
               if (!active) return;
               setRoom(nextRoom);
               setSocketError(null);
+              if (nextRoom.phase === 'lobby') {
+                setWorld(null);
+              }
               if (reason === 'welcome') {
                 pushLog(
                   reconnected
@@ -115,6 +122,18 @@ export function App() {
                 pushLog('Host disconnected — host role migrated automatically');
               } else if (reason === 'leave') {
                 pushLog('A disconnected teammate left the session');
+              } else if (reason === 'game_started') {
+                pushLog('Chamber 01 launched!');
+              } else if (reason === 'returned_lobby') {
+                pushLog('Returned to Activity lobby');
+              }
+            },
+            onGameSnapshot: (nextWorld, events) => {
+              if (!active) return;
+              setWorld(nextWorld);
+              if (events.length > 0) {
+                setLatestEvents(events);
+                setEventBatchId((n) => n + 1);
               }
             },
             onPingUpdate: (rtt) => {
@@ -145,7 +164,7 @@ export function App() {
       socketRef.current = null;
       sessionCtx?.cleanup();
     };
-  }, []);
+  }, [pushLog]);
 
   const selfPlayer: ActivityPlayer | undefined = useMemo(() => {
     if (!room || !context) return undefined;
@@ -162,6 +181,22 @@ export function App() {
     [connectedPlayers],
   );
 
+  const handleSendInput = useCallback((seq: number, buttons: number) => {
+    socketRef.current?.sendInput(seq, buttons);
+  }, []);
+
+  const handleSwapSolo = useCallback(() => {
+    socketRef.current?.swapSoloPuppet();
+  }, []);
+
+  const handleRestartLevel = useCallback(() => {
+    socketRef.current?.restartLevel();
+  }, []);
+
+  const handleReturnLobby = useCallback(() => {
+    socketRef.current?.returnLobby();
+  }, []);
+
   // Compact Picture-in-Picture (PIP) view when minimized inside Discord
   if (layoutMode === 1 && context) {
     return (
@@ -172,7 +207,7 @@ export function App() {
         </div>
         <div className="pip-count">
           <strong>{connectedPlayers.length}</strong>
-          <span>/ {room?.maxPlayers ?? 8} in session</span>
+          <span>{room?.phase === 'playing' ? 'playing Chamber 01' : `/ ${room?.maxPlayers ?? 8} in lobby`}</span>
         </div>
         <div className="pip-avatars">
           {(room?.players ?? []).slice(0, 6).map((player) => (
@@ -224,8 +259,28 @@ export function App() {
           <div className="brand-mark brand-large">TOGETHER?</div>
           <div className="pulse-bar" aria-hidden="true" />
           <p className="loading-detail">{bootProgress.detail}</p>
-          <span className="muted-label">Phase 1 · Discord Activity Handshake</span>
+          <span className="muted-label">Discord Activity Handshake</span>
         </section>
+      </main>
+    );
+  }
+
+  // Live Gameplay Screen (Phase 2 — Chamber 01: Synchrony)
+  if (room?.phase === 'playing' && world) {
+    return (
+      <main className="activity-shell game-shell">
+        <GameStage
+          world={world}
+          events={latestEvents}
+          eventBatchId={eventBatchId}
+          localUserId={context.user.id}
+          isHost={Boolean(selfPlayer?.isHost)}
+          pingMs={pingMs}
+          onSendInput={handleSendInput}
+          onSwapSolo={handleSwapSolo}
+          onRestartLevel={handleRestartLevel}
+          onReturnLobby={handleReturnLobby}
+        />
       </main>
     );
   }
@@ -235,7 +290,12 @@ export function App() {
     socketRef.current.setReady(!selfPlayer.ready);
   };
 
-  const hasMultiplayerPair = connectedPlayers.length >= (room?.minPlayers ?? 2);
+  const handleStartGame = () => {
+    socketRef.current?.startGame();
+  };
+
+  const isSolo = connectedPlayers.length === 1;
+  const isHost = Boolean(selfPlayer?.isHost);
 
   return (
     <main className="activity-shell">
@@ -264,10 +324,9 @@ export function App() {
         <div className="panel roster-panel">
           <div className="panel-header">
             <div>
-              <h1 className="panel-title">Shared Activity Session</h1>
+              <h1 className="panel-title">Chamber 01 · Synchrony Lobby</h1>
               <p className="panel-subtitle">
-                Everyone launching this Activity in the same channel joins automatically via{' '}
-                <code>instanceId</code>.
+                Stack on teammates, deploy the energy bridge, and unlock the vault door together.
               </p>
             </div>
             <div className="count-badge">
@@ -325,24 +384,24 @@ export function App() {
                   </div>
 
                   <div className="player-meta">
-                    <div className="player-name-row">
-                      <span className="player-display-name">{player.displayName}</span>
-                      {isSelf && <span className="mini-tag">YOU</span>}
-                      {player.isHost && <span className="mini-tag mini-tag-host">HOST</span>}
-                    </div>
+                    <span className="player-display-name" title={player.displayName}>
+                      {player.displayName}
+                    </span>
                     <span className="player-username">@{player.username}</span>
                     <div className="player-status-row">
                       {!player.connected ? (
-                        <span className="state-text state-offline">Reconnecting (30s grace)</span>
+                        <span className="state-text state-offline">Reconnecting (30s)</span>
                       ) : player.ready ? (
                         <span className="state-text state-ready">Ready</span>
                       ) : (
                         <span className="state-text state-connected">Connected</span>
                       )}
+                      {isSelf && <span className="mini-tag">YOU</span>}
+                      {player.isHost && <span className="mini-tag mini-tag-host">HOST</span>}
                     </div>
                   </div>
 
-                  <div className="sprite-preview" title="Phase 2 Pixel Character">
+                  <div className="sprite-preview" title="Pixel Character">
                     <PixelAvatarCanvas
                       color={player.color}
                       connected={player.connected}
@@ -357,15 +416,19 @@ export function App() {
 
           <div className="action-bar">
             <div className="readiness-summary">
-              {hasMultiplayerPair ? (
+              {isSolo ? (
+                <span className="muted-note">
+                  Solo? Click <strong>Start Solo Practice</strong> to test Chamber 01 with a swappable{' '}
+                  <code>Tab</code> partner — or wait for friends to click <strong>Join Activity</strong>.
+                </span>
+              ) : isHost ? (
                 <span className="status-good">
-                  {connectedPlayers.length} players synced in this instance ({readyCount} ready).
-                  Phase 1 multiplayer verification active.
+                  {connectedPlayers.length} players synced ({readyCount} ready). Press{' '}
+                  <strong>Start Co-op Level</strong> whenever everyone is set!
                 </span>
               ) : (
-                <span className="muted-note">
-                  Have a second Discord user click <strong>Join Activity</strong> in your test server
-                  to verify shared <code>instanceId</code> sync.
+                <span className="status-good">
+                  {connectedPlayers.length} players synced ({readyCount} ready). Waiting for Host to start Chamber 01.
                 </span>
               )}
             </div>
@@ -373,12 +436,22 @@ export function App() {
             <div className="action-buttons">
               <button
                 type="button"
-                className={`btn ${selfPlayer?.ready ? 'btn-secondary' : 'btn-primary'}`}
+                className="btn btn-secondary"
                 onClick={toggleReady}
                 disabled={connectionState !== 'connected' || !selfPlayer}
               >
                 {selfPlayer?.ready ? 'Cancel Ready' : 'Mark Ready'}
               </button>
+              {isHost && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleStartGame}
+                  disabled={connectionState !== 'connected' || connectedPlayers.length === 0}
+                >
+                  {isSolo ? 'Start Solo Practice' : `Start Co-op (${connectedPlayers.length}P)`}
+                </button>
+              )}
               {connectionState !== 'connected' && (
                 <button
                   type="button"
@@ -415,8 +488,8 @@ export function App() {
                 </dd>
               </div>
               <div>
-                <dt>Phase Gate</dt>
-                <dd className="accent-mint">Phase 1 · Launch &amp; Sync</dd>
+                <dt>Build Stage</dt>
+                <dd className="accent-mint">Phase 2 · Chamber 01</dd>
               </div>
             </dl>
           </section>

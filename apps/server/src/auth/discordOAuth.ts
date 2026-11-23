@@ -74,8 +74,17 @@ export async function exchangeDiscordAuthorizationCode(params: {
   });
 
   if (!tokenRes.ok) {
+    let discordErrorDetail = '';
+    try {
+      const errBody = (await tokenRes.json()) as { error?: string; error_description?: string };
+      if (errBody.error) {
+        discordErrorDetail = ` (${errBody.error}${errBody.error_description ? `: ${errBody.error_description}` : ''})`;
+      }
+    } catch {
+      // ignore non-JSON body
+    }
     throw new DiscordOAuthError(
-      `Discord token exchange rejected with HTTP ${tokenRes.status}.`,
+      `Discord token exchange rejected with HTTP ${tokenRes.status}${discordErrorDetail}.`,
       401,
       'TOKEN_EXCHANGE_FAILED',
     );

@@ -11,6 +11,9 @@ export const RoomUpdateReasonSchema = z.enum([
   'leave',
   'ready',
   'host_migrated',
+  'game_started',
+  'game_restarted',
+  'returned_lobby',
   'sync',
 ]);
 export type RoomUpdateReason = z.infer<typeof RoomUpdateReasonSchema>;
@@ -45,6 +48,80 @@ export const ActivityRoomStateSchema = z.object({
 });
 export type ActivityRoomState = z.infer<typeof ActivityRoomStateSchema>;
 
+export const SimEventSchema = z.object({
+  type: z.enum([
+    'jump',
+    'land',
+    'switch_on',
+    'bridge_on',
+    'bridge_lock',
+    'door_unlock',
+    'respawn',
+    'level_complete',
+  ]),
+  x: z.number(),
+  y: z.number(),
+  color: z.string().optional(),
+  playerId: z.string().optional(),
+});
+
+export const SimPlayerStateSchema = z.object({
+  id: z.string(),
+  displayName: z.string(),
+  slot: z.number().int(),
+  color: z.string(),
+  badge: z.string(),
+  isSoloPuppet: z.boolean(),
+  connected: z.boolean(),
+  x: z.number(),
+  y: z.number(),
+  vx: z.number(),
+  vy: z.number(),
+  facing: z.union([z.literal(1), z.literal(-1)]),
+  grounded: z.boolean(),
+  standingOnId: z.string().nullable(),
+  coyoteTicks: z.number().int(),
+  jumpBufferTicks: z.number().int(),
+  prevJumpDown: z.boolean(),
+  invulnTicks: z.number().int(),
+  atExit: z.boolean(),
+  lastProcessedSeq: z.number().int(),
+});
+
+export const GameWorldStateSchema = z.object({
+  levelId: z.string(),
+  tick: z.number().int().nonnegative(),
+  elapsedMs: z.number().int().nonnegative(),
+  soloPractice: z.boolean(),
+  soloActiveId: z.string().nullable(),
+  status: z.enum(['playing', 'completed']),
+  completionTimeMs: z.number().int().nullable(),
+  respawnCount: z.number().int().nonnegative(),
+  players: z.array(SimPlayerStateSchema),
+  switches: z.array(
+    z.object({
+      id: z.string(),
+      pressed: z.boolean(),
+      latched: z.boolean(),
+    }),
+  ),
+  bridges: z.array(
+    z.object({
+      id: z.string(),
+      active: z.boolean(),
+      locked: z.boolean(),
+    }),
+  ),
+  exitDoor: z.object({
+    unlocked: z.boolean(),
+    chargeTicks: z.number().int().nonnegative(),
+    chargeRequired: z.number().int().positive(),
+    playersInside: z.number().int().nonnegative(),
+    playersRequired: z.number().int().positive(),
+    exitHoldTicks: z.number().int().nonnegative(),
+  }),
+});
+
 export const C2SJoinInstanceSchema = z.object({
   type: z.literal('join_instance'),
   instanceId: z.string().min(1).max(ACTIVITY_LIMITS.MAX_INSTANCE_ID_LENGTH),
@@ -58,6 +135,28 @@ export const C2SSetReadySchema = z.object({
   ready: z.boolean(),
 });
 
+export const C2SStartGameSchema = z.object({
+  type: z.literal('start_game'),
+});
+
+export const C2SInputSchema = z.object({
+  type: z.literal('input'),
+  seq: z.number().int().nonnegative().max(1_000_000_000),
+  buttons: z.number().int().min(0).max(7),
+});
+
+export const C2SSwapSoloPuppetSchema = z.object({
+  type: z.literal('swap_solo_puppet'),
+});
+
+export const C2SRestartLevelSchema = z.object({
+  type: z.literal('restart_level'),
+});
+
+export const C2SReturnLobbySchema = z.object({
+  type: z.literal('return_lobby'),
+});
+
 export const C2SPingSchema = z.object({
   type: z.literal('ping'),
   clientTime: z.number().finite().nonnegative(),
@@ -66,6 +165,11 @@ export const C2SPingSchema = z.object({
 export const C2SMessageSchema = z.discriminatedUnion('type', [
   C2SJoinInstanceSchema,
   C2SSetReadySchema,
+  C2SStartGameSchema,
+  C2SInputSchema,
+  C2SSwapSoloPuppetSchema,
+  C2SRestartLevelSchema,
+  C2SReturnLobbySchema,
   C2SPingSchema,
 ]);
 export type C2SMessage = z.infer<typeof C2SMessageSchema>;
@@ -75,6 +179,7 @@ export const ErrorCodeSchema = z.enum([
   'UNAUTHORIZED',
   'ROOM_FULL',
   'NOT_IN_ROOM',
+  'NOT_HOST',
   'RATE_LIMITED',
   'SERVER_ERROR',
 ]);
@@ -85,12 +190,20 @@ export const S2CWelcomeSchema = z.object({
   playerId: z.string().min(1),
   reconnected: z.boolean(),
   room: ActivityRoomStateSchema,
+  world: GameWorldStateSchema.nullable().optional(),
 });
 
 export const S2CRoomStateSchema = z.object({
   type: z.literal('room_state'),
   reason: RoomUpdateReasonSchema,
   room: ActivityRoomStateSchema,
+});
+
+export const S2CGameSnapshotSchema = z.object({
+  type: z.literal('game_snapshot'),
+  serverTime: z.number().int().nonnegative(),
+  world: GameWorldStateSchema,
+  events: z.array(SimEventSchema),
 });
 
 export const S2CPongSchema = z.object({
@@ -108,6 +221,7 @@ export const S2CErrorSchema = z.object({
 export const S2CMessageSchema = z.discriminatedUnion('type', [
   S2CWelcomeSchema,
   S2CRoomStateSchema,
+  S2CGameSnapshotSchema,
   S2CPongSchema,
   S2CErrorSchema,
 ]);
@@ -123,10 +237,6 @@ export function parseS2CMessage(raw: unknown): S2CMessage | null {
   return result.success ? result.data : null;
 }
 
-/**
- * Builds an official Discord CDN avatar URL (allowed under Discord Activity CSP).
- * Falls back cleanly to Discord's default embed avatar when avatarHash is absent.
- */
 export function buildDiscordAvatarUrl(
   userId: string,
   avatarHash: string | null | undefined,
