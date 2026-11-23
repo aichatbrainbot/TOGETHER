@@ -5,9 +5,11 @@ import {
   type SimEvent,
   type SimPlayerState,
 } from '@together/game-core';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GameRenderer, type RenderedPlayerPose } from '../game/GameRenderer.js';
+import type { GameSettings } from '../game/settings.js';
 import { SoundEngine } from '../game/SoundEngine.js';
+import { FullscreenIcon, RestartIcon, SoundOffIcon, SoundOnIcon } from './Icons.js';
 
 interface GameStageProps {
   world: GameWorldState;
@@ -16,6 +18,8 @@ interface GameStageProps {
   localUserId: string;
   isHost: boolean;
   pingMs: number | null;
+  settings: GameSettings;
+  onUpdateSettings: (patch: Partial<GameSettings>) => void;
   onSendInput: (seq: number, buttons: number) => void;
   onSwapSolo: () => void;
   onRestartLevel: () => void;
@@ -37,18 +41,24 @@ export function GameStage({
   localUserId,
   isHost,
   pingMs,
+  settings,
+  onUpdateSettings,
   onSendInput,
   onSwapSolo,
   onRestartLevel,
   onReturnLobby,
 }: GameStageProps) {
+  const stageRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rendererRef = useRef<GameRenderer | null>(null);
   const soundRef = useRef<SoundEngine | null>(null);
-  const [muted, setMuted] = useState(false);
 
-  // Latest authoritative world & smooth interpolated poses for 60fps Canvas rendering
   const latestWorldRef = useRef<GameWorldState>(world);
+  const settingsRef = useRef<GameSettings>(settings);
+  const viewportRef = useRef<{ w: number; h: number }>({
+    w: LEVEL_CHAMBER_01.width,
+    h: LEVEL_CHAMBER_01.height,
+  });
   const posesRef = useRef<Map<string, RenderedPlayerPose>>(new Map());
   const keysRef = useRef<Set<string>>(new Set());
   const touchBitsRef = useRef<number>(0);
@@ -59,18 +69,22 @@ export function GameStage({
   if (!rendererRef.current) rendererRef.current = new GameRenderer();
   if (!soundRef.current) soundRef.current = new SoundEngine();
 
+  settingsRef.current = settings;
+  useEffect(() => {
+    soundRef.current?.setMuted(!settings.soundEnabled);
+    soundRef.current?.setVolume(settings.volume);
+  }, [settings.soundEnabled, settings.volume]);
+
   // Keep latest authoritative snapshot in ref & trigger event VFX/SFX once per batch
   useEffect(() => {
     latestWorldRef.current = world;
 
-    // Seed initial poses immediately so players never lerp in from (0,0)
     const poses = posesRef.current;
     const validIds = new Set<string>();
     for (const p of world.players) {
       validIds.add(p.id);
       const existing = poses.get(p.id);
       if (!existing || Math.hypot(existing.x - p.x, existing.y - p.y) > 96) {
-        // Snap immediately on spawn or respawn teleport
         poses.set(p.id, {
           x: p.x,
           y: p.y,
@@ -99,6 +113,36 @@ export function GameStage({
       }
     }
   }, [world, events, eventBatchId]);
+
+  // True edge-to-edge full-screen canvas sizing (DPR-aware)
+  useEffect(() => {
+    const container = stageRef.current;
+    const canvas = canvasRef.current;
+    if (!container || !canvas) return;
+
+    const updateCanvasSize = () => {
+      const rect = container.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(200, Math.floor(rect.height));
+      viewportRef.current = { w, h };
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+    };
+
+    updateCanvasSize();
+    const ro = new ResizeObserver(updateCanvasSize);
+    ro.observe(container);
+    window.addEventListener('resize', updateCanvasSize);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', updateCanvasSize);
+    };
+  }, []);
 
   const computeButtons = useCallback((): number => {
     let bits = touchBitsRef.current;
@@ -175,7 +219,7 @@ export function GameStage({
     };
   }, [flushInput, onRestartLevel, onSendInput, onSwapSolo]);
 
-  // 60 FPS animation loop with smooth entity interpolation
+  // 60 FPS full-screen animation loop with smooth entity interpolation
   useEffect(() => {
     let rafId = 0;
     let lastTime = performance.now();
@@ -187,7 +231,6 @@ export function GameStage({
       const currentWorld = latestWorldRef.current;
       const poses = posesRef.current;
 
-      // Exponential smoothing toward latest 30 Hz authoritative state (silky motion, zero jitter)
       const smoothFactor = 1 - Math.exp(-24 * dtSec);
       for (const p of currentWorld.players) {
         const pose = poses.get(p.id);
@@ -214,14 +257,13 @@ export function GameStage({
       if (canvas) {
         const ctx = canvas.getContext('2d');
         if (ctx) {
-          rendererRef.current?.render(
-            ctx,
-            currentWorld,
-            poses,
-            localUserId,
-            dtSec,
-            LEVEL_CHAMBER_01,
-          );
+          rendererRef.current?.render(ctx, currentWorld, poses, localUserId, dtSec, {
+            level: LEVEL_CHAMBER_01,
+            viewportWidth: viewportRef.current.w,
+            viewportHeight: viewportRef.current.h,
+            showPlayerNames: settingsRef.current.showPlayerNames,
+            reducedMotion: settingsRef.current.reducedMotion,
+          });
         }
       }
 
@@ -242,10 +284,12 @@ export function GameStage({
     flushInput(false);
   };
 
-  const toggleMute = () => {
-    const next = !muted;
-    setMuted(next);
-    soundRef.current?.setMuted(next);
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      void document.documentElement.requestFullscreen?.().catch(() => {});
+    } else {
+      void document.exitFullscreen?.().catch(() => {});
+    }
   };
 
   const controlledPlayer: SimPlayerState | undefined = useMemo(() => {
@@ -254,17 +298,26 @@ export function GameStage({
   }, [world, localUserId]);
 
   return (
-    <section className="game-stage">
-      <div className="game-hud panel">
-        <div className="hud-left">
+    <section ref={stageRef} className="game-stage-fullscreen">
+      <canvas
+        ref={canvasRef}
+        className="game-canvas-fullscreen"
+        aria-label="TOGETHER? Cooperative Puzzle Platformer Chamber 01"
+      />
+
+      {/* Translucent Floating Top HUD (0 px lost from full-screen canvas!) */}
+      <div className="floating-hud">
+        <div className="hud-cluster">
           <span className="hud-level-title">{LEVEL_CHAMBER_01.name}</span>
           <span className={`pill ${world.soloPractice ? 'pill-warning' : 'pill-accent'}`}>
-            {world.soloPractice ? 'SOLO PRACTICE' : `CO-OP · ${world.players.filter((p) => p.connected).length} PLAYERS`}
+            {world.soloPractice
+              ? 'SOLO'
+              : `CO-OP · ${world.players.filter((p) => p.connected).length}P`}
           </span>
           <span className="hud-stat">
-            Time <code>{formatTimer(world.completionTimeMs ?? world.elapsedMs)}</code>
+            <code>{formatTimer(world.completionTimeMs ?? world.elapsedMs)}</code>
           </span>
-          <span className="hud-stat">
+          <span className="hud-stat hud-respawns">
             Respawns <code>{world.respawnCount}</code>
           </span>
           {pingMs !== null && (
@@ -274,97 +327,64 @@ export function GameStage({
           )}
         </div>
 
-        <div className="hud-actions">
+        <div className="hud-cluster">
           {world.soloPractice && (
             <button
               type="button"
-              className="btn btn-primary btn-compact"
+              className="hud-btn hud-btn-accent"
               onClick={onSwapSolo}
-              title="Swap control between P1 and Partner (Tab)"
+              title="Swap control between P1 and Solo Partner (Tab)"
             >
-              Swap ({controlledPlayer?.badge ?? 'P1'}) [Tab]
+              Swap {controlledPlayer?.badge ?? 'P1'} [Tab]
             </button>
           )}
           <button
             type="button"
-            className="btn btn-secondary btn-compact"
-            onClick={toggleMute}
+            className="hud-btn hud-btn-icon"
+            onClick={() => onUpdateSettings({ soundEnabled: !settings.soundEnabled })}
+            title={settings.soundEnabled ? 'Mute sound' : 'Unmute sound'}
+            aria-label={settings.soundEnabled ? 'Mute sound' : 'Unmute sound'}
           >
-            {muted ? 'Sound Off' : 'Sound On'}
+            {settings.soundEnabled ? <SoundOnIcon /> : <SoundOffIcon />}
           </button>
           <button
             type="button"
-            className="btn btn-secondary btn-compact"
+            className="hud-btn hud-btn-icon"
+            onClick={toggleFullscreen}
+            title="Toggle fullscreen"
+            aria-label="Toggle fullscreen"
+          >
+            <FullscreenIcon />
+          </button>
+          <button
+            type="button"
+            className="hud-btn"
             onClick={onRestartLevel}
             title="Restart level (R)"
           >
-            Restart [R]
+            <RestartIcon />
+            <span>Restart</span>
           </button>
           {isHost && (
-            <button
-              type="button"
-              className="btn btn-secondary btn-compact"
-              onClick={onReturnLobby}
-            >
-              Lobby
+            <button type="button" className="hud-btn" onClick={onReturnLobby}>
+              Menu
             </button>
           )}
         </div>
       </div>
 
-      <div className="canvas-frame panel">
-        <canvas
-          ref={canvasRef}
-          width={LEVEL_CHAMBER_01.width}
-          height={LEVEL_CHAMBER_01.height}
-          className="game-canvas"
-          aria-label="TOGETHER? Cooperative Puzzle Platformer Chamber 01"
-        />
-
-        {world.status === 'completed' && (
-          <div className="victory-overlay">
-            <div className="panel victory-card">
-              <span className="pill pill-accent">CHAMBER CLEARED</span>
-              <h2 className="victory-title">TOGETHER!</h2>
-              <p className="victory-subtitle">
-                All teammates unlocked the vault and reached the exit.
-              </p>
-              <div className="victory-stats">
-                <div className="surface stat-tile">
-                  <span className="muted-label">Clear Time</span>
-                  <strong>{formatTimer(world.completionTimeMs ?? world.elapsedMs)}</strong>
-                </div>
-                <div className="surface stat-tile">
-                  <span className="muted-label">Respawns</span>
-                  <strong>{world.respawnCount}</strong>
-                </div>
-              </div>
-              <div className="victory-actions">
-                <button type="button" className="btn btn-primary" onClick={onRestartLevel}>
-                  Play Again
-                </button>
-                {isHost && (
-                  <button type="button" className="btn btn-secondary" onClick={onReturnLobby}>
-                    Return to Lobby
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <footer className="controls-footer">
-        <div className="desktop-hints">
+      {/* Floating Bottom Control Hints / Touch Controls */}
+      <div className="floating-bottom-controls">
+        <div className="desktop-hints-pill">
           <span>
-            <code>A/D</code> or <code>←/→</code> Move
+            <code>A/D</code> Move
           </span>
           <span>
-            <code>W/↑/Space</code> Jump &amp; Stack on Heads
+            <code>Space</code> Jump &amp; Stack
           </span>
           {world.soloPractice && (
             <span>
-              <code>Tab</code> Swap P1 / Solo Partner
+              <code>Tab</code> Swap Partner
             </span>
           )}
           <span>
@@ -403,11 +423,7 @@ export function GameStage({
           </div>
           <div className="touch-pad-right">
             {world.soloPractice && (
-              <button
-                type="button"
-                className="touch-btn touch-btn-swap"
-                onClick={onSwapSolo}
-              >
+              <button type="button" className="touch-btn touch-btn-swap" onClick={onSwapSolo}>
                 SWAP
               </button>
             )}
@@ -426,7 +442,39 @@ export function GameStage({
             </button>
           </div>
         </div>
-      </footer>
+      </div>
+
+      {world.status === 'completed' && (
+        <div className="victory-overlay">
+          <div className="panel victory-card">
+            <span className="pill pill-accent">CHAMBER CLEARED</span>
+            <h2 className="victory-title">TOGETHER!</h2>
+            <p className="victory-subtitle">
+              All teammates unlocked the vault and reached the exit.
+            </p>
+            <div className="victory-stats">
+              <div className="surface stat-tile">
+                <span className="muted-label">Clear Time</span>
+                <strong>{formatTimer(world.completionTimeMs ?? world.elapsedMs)}</strong>
+              </div>
+              <div className="surface stat-tile">
+                <span className="muted-label">Respawns</span>
+                <strong>{world.respawnCount}</strong>
+              </div>
+            </div>
+            <div className="victory-actions">
+              <button type="button" className="btn btn-primary" onClick={onRestartLevel}>
+                Play Again
+              </button>
+              {isHost && (
+                <button type="button" className="btn btn-secondary" onClick={onReturnLobby}>
+                  Main Menu
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

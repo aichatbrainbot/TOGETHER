@@ -73,12 +73,37 @@ export class GameRenderer {
     posesByPlayerId: ReadonlyMap<string, RenderedPlayerPose>,
     localUserId: string,
     dtSec: number,
-    level: LevelDefinition = LEVEL_CHAMBER_01,
+    options: {
+      level?: LevelDefinition;
+      viewportWidth?: number;
+      viewportHeight?: number;
+      showPlayerNames?: boolean;
+      reducedMotion?: boolean;
+    } = {},
   ): void {
-    this.animTime += dtSec;
+    const level = options.level ?? LEVEL_CHAMBER_01;
+    const viewW = options.viewportWidth ?? level.width;
+    const viewH = options.viewportHeight ?? level.height;
+    const showNames = options.showPlayerNames ?? true;
+    const reducedMotion = options.reducedMotion ?? false;
+
+    this.animTime += reducedMotion ? dtSec * 0.25 : dtSec;
     this.updateParticles(dtSec);
 
+    ctx.save();
     ctx.imageSmoothingEnabled = false;
+
+    // Fill entire full-screen viewport seamlessly in deep dark obsidian (#101116)
+    ctx.fillStyle = THEME_COLORS.background;
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    // Compute largest crisp scale fitting the 800x448 chamber edge-to-edge
+    const scale = Math.min(viewW / level.width, viewH / level.height);
+    const offsetX = Math.floor((viewW - level.width * scale) / 2);
+    const offsetY = Math.floor((viewH - level.height * scale) / 2);
+
+    ctx.translate(offsetX, offsetY);
+    ctx.scale(scale, scale);
 
     // 1. Dark atmospheric chamber backdrop
     this.drawBackground(ctx, level);
@@ -121,11 +146,15 @@ export class GameRenderer {
         facing: player.facing,
         grounded: player.grounded,
       };
-      this.drawPlayer(ctx, player, pose, player.id === controlledId, world.soloPractice);
+      this.drawPlayer(ctx, player, pose, player.id === controlledId, world.soloPractice, showNames);
     }
 
     // 10. Crisp pixel particles
-    this.drawParticles(ctx);
+    if (!reducedMotion) {
+      this.drawParticles(ctx);
+    }
+
+    ctx.restore();
   }
 
   private drawBackground(ctx: CanvasRenderingContext2D, level: LevelDefinition): void {
@@ -440,6 +469,7 @@ export class GameRenderer {
     pose: RenderedPlayerPose,
     isControlled: boolean,
     soloPractice: boolean,
+    showNames: boolean,
   ): void {
     const px = Math.round(pose.x);
     const py = Math.round(pose.y);
@@ -508,16 +538,18 @@ export class GameRenderer {
       // Active control chevron indicator
       const bob = Math.round(Math.sin(this.animTime * 7) * 1.5);
       ctx.fillStyle = soloPractice ? THEME_COLORS.secondaryAccent : player.color;
-      ctx.fillRect(centerX - 3, py - 18 + bob, 6, 2);
-      ctx.fillRect(centerX - 1, py - 16 + bob, 2, 2);
+      ctx.fillRect(centerX - 3, py - (showNames ? 18 : 10) + bob, 6, 2);
+      ctx.fillRect(centerX - 1, py - (showNames ? 16 : 8) + bob, 2, 2);
     }
 
-    ctx.fillStyle = 'rgba(16, 17, 22, 0.72)';
-    const textWidth = ctx.measureText(label).width;
-    ctx.fillRect(centerX - textWidth / 2 - 3, py - 12, textWidth + 6, 10);
+    if (showNames) {
+      ctx.fillStyle = 'rgba(16, 17, 22, 0.72)';
+      const textWidth = ctx.measureText(label).width;
+      ctx.fillRect(centerX - textWidth / 2 - 3, py - 12, textWidth + 6, 10);
 
-    ctx.fillStyle = isControlled ? THEME_COLORS.textPrimary : THEME_COLORS.textMuted;
-    ctx.fillText(label, centerX, py - 4);
+      ctx.fillStyle = isControlled ? THEME_COLORS.textPrimary : THEME_COLORS.textMuted;
+      ctx.fillText(label, centerX, py - 4);
+    }
 
     ctx.restore();
   }
