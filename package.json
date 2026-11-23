@@ -12,7 +12,7 @@
     "start:activity": "pnpm build && node scripts/start-activity.mjs",
     "tunnel": "node scripts/tunnel.mjs http://127.0.0.1:3001",
     "tunnel:dev": "node scripts/tunnel.mjs http://127.0.0.1:5173",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r typecheck && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },

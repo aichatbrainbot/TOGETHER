@@ -502,14 +502,14 @@ describe('Stage 4 & Special Stages S1-S4 mechanics + 8-stage playability invaria
     p2.x = 524;
     p2.y = 368 - PHYSICS.PLAYER_HEIGHT;
     let crumbledEvent = false;
-    for (let t = 0; t < cDef.delayTicks + 4; t += 1) {
+    for (let t = 0; t < (cDef.delayTicks ?? 50) + 4; t += 1) {
       const evs = stepGameWorld(world, {}, LEVEL_CHAMBER_04);
       if (evs.some((e) => e.type === 'crumble')) crumbledEvent = true;
     }
     expect(crumbledEvent).toBe(true);
     expect(world.crumblePlatforms[0]?.state).toBe('gone');
 
-    for (let t = 0; t < cDef.respawnTicks + 4; t += 1) {
+    for (let t = 0; t < (cDef.respawnTicks ?? 144) + 4; t += 1) {
       stepGameWorld(world, {}, LEVEL_CHAMBER_04);
     }
     expect(world.crumblePlatforms[0]?.state).toBe('solid');
